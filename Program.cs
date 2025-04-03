@@ -6,13 +6,22 @@ using System.Threading.Tasks;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Add console logging.
 builder.Logging.AddConsole();
+
+// Add SignalR services.
 builder.Services.AddSignalR();
 
 var app = builder.Build();
+
+// Use top-level route registration for the hub.
 app.MapHub<CockpitHub>("/sharedcockpithub");
+
 app.Run();
 
+
+// Define AircraftData as a class with public properties.
+// Note: Changed ParkingBrake type to int to match the SimConnect INT32 “bool”.
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -27,17 +36,21 @@ public class AircraftData
     public double Rudder { get; set; }
     public double BrakeLeft { get; set; }
     public double BrakeRight { get; set; }
-    public int ParkingBrake { get; set; }  // corrected
+    public int ParkingBrake { get; set; } // Changed from double to int.
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
 }
 
+// The SignalR hub.
 public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
 
-    public CockpitHub(ILogger<CockpitHub> logger) => _logger = logger;
+    public CockpitHub(ILogger<CockpitHub> logger)
+    {
+        _logger = logger;
+    }
 
     public async Task JoinSession(string sessionCode)
     {
@@ -47,7 +60,8 @@ public class CockpitHub : Hub
 
     public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
+        _logger.LogInformation("Received aircraft data from host: {Data}", System.Text.Json.JsonSerializer.Serialize(data));
         await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
-        _logger.LogInformation("Broadcasting data to session {SessionCode}: {Data}", sessionCode, System.Text.Json.JsonSerializer.Serialize(data));
+        _logger.LogInformation("Broadcasted aircraft data to session {SessionCode}", sessionCode);
     }
 }
