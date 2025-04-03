@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -8,7 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Add console logging.
 builder.Logging.AddConsole();
 
-// Register SignalR services.
+// Add SignalR services.
 builder.Services.AddSignalR();
 
 var app = builder.Build();
@@ -18,9 +18,8 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-
 // Define AircraftData as a class with public properties.
-// Note: ParkingBrake is an int (acting as a boolean), and we add IAS fields.
+// Note: ParkingBrake is an int (representing a boolean) and we include IndicatedAirspeed.
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -35,31 +34,29 @@ public class AircraftData
     public double Rudder { get; set; }
     public double BrakeLeft { get; set; }
     public double BrakeRight { get; set; }
-    public int ParkingBrake { get; set; } // Represents a boolean (0 or 1)
+    public int ParkingBrake { get; set; }
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
-    public double IndicatedAirspeed { get; set; } // In knots
-    public double TrueAirspeed { get; set; }        // In knots
+    public double IndicatedAirspeed { get; set; }
 }
 
-// SignalR Hub for broadcasting flight data.
-public class CockpitHub : Microsoft.AspNetCore.SignalR.Hub
+// The SignalR hub.
+public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
-
     public CockpitHub(ILogger<CockpitHub> logger)
     {
         _logger = logger;
     }
-
-    public async System.Threading.Tasks.Task JoinSession(string sessionCode)
+    
+    public async Task JoinSession(string sessionCode)
     {
         _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", Context.ConnectionId, sessionCode);
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
     }
-
-    public async System.Threading.Tasks.Task SendAircraftData(string sessionCode, AircraftData data)
+    
+    public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
         _logger.LogInformation("Received aircraft data from host: {Data}", System.Text.Json.JsonSerializer.Serialize(data));
         await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
