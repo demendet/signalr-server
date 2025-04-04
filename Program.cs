@@ -50,13 +50,14 @@ public class AircraftData
     public double VelocityBodyX { get; set; }
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
-
+    // Light states
     public double BeaconLights { get; set; }
-public double LandingLights { get; set; }
-public double TaxiLights { get; set; }
-public double NavLights { get; set; }
-public double StrobeLights { get; set; }
-
+    public double LandingLights { get; set; }
+    public double TaxiLights { get; set; }
+    public double NavLights { get; set; }
+    public double StrobeLights { get; set; }
+    // Source identifier for bidirectional communication
+    public string Source { get; set; } = "Host";
 }
 
 // The SignalR hub
@@ -77,10 +78,20 @@ public class CockpitHub : Hub
 
     public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
-        // Only log essential info to avoid console spam
-        _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
-            sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
+        // Log based on source to better understand traffic
+        if (data.Source == "Host")
+        {
+            _logger.LogInformation("Host data in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
+                sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
+        }
+        else
+        {
+            _logger.LogInformation("Client light data in session {SessionCode}: " +
+                "Beacon={Beacon}, Landing={Landing}, Taxi={Taxi}, Nav={Nav}, Strobe={Strobe}", 
+                sessionCode, data.BeaconLights, data.LandingLights, data.TaxiLights, data.NavLights, data.StrobeLights);
+        }
             
+        // Send the data to all clients in the group (including the sender)
         await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
     }
 }
