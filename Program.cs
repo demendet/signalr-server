@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -58,6 +59,8 @@ public class AircraftData
     public double StrobeLights { get; set; }
     // Source identifier for bidirectional communication
     public string Source { get; set; } = "Host";
+    // Dictionary for light toggle commands - new feature for client→host light control
+    public Dictionary<string, bool> LightToggles { get; set; } = new Dictionary<string, bool>();
 }
 
 // The SignalR hub
@@ -78,15 +81,20 @@ public class CockpitHub : Hub
 
     public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
-        // Log based on source to better understand traffic
-        if (data.Source == "Host")
+        // Log based on source and content
+        if (data.LightToggles != null && data.LightToggles.Count > 0)
         {
-            _logger.LogInformation("Host data in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
-                sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
+            _logger.LogInformation("Client light toggles in session {SessionCode}: {LightCount} changes", 
+                sessionCode, data.LightToggles.Count);
         }
-        else
+        else if (data.Source == "Host")
         {
-            _logger.LogInformation("Client light data in session {SessionCode}: " +
+            _logger.LogInformation("Host data in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
+                sessionCode, data.Altitude, data.GroundSpeed);
+        }
+        else if (data.Source == "Client")
+        {
+            _logger.LogInformation("Client light state in session {SessionCode}: " +
                 "Beacon={Beacon}, Landing={Landing}, Taxi={Taxi}, Nav={Nav}, Strobe={Strobe}", 
                 sessionCode, data.BeaconLights, data.LandingLights, data.TaxiLights, data.NavLights, data.StrobeLights);
         }
