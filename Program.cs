@@ -19,10 +19,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-
-// Define AircraftData as a class with public properties.
-// Note: ParkingBrake type is int (matching the SimConnect INT32 “bool”).
-// We also add IndicatedAirspeed (in knots) for IAS sync.
+// Define AircraftData as a class with public properties (without ParkingBrake).
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -37,11 +34,10 @@ public class AircraftData
     public double Rudder { get; set; }
     public double BrakeLeft { get; set; }
     public double BrakeRight { get; set; }
-    public int ParkingBrake { get; set; } // Changed from double to int.
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
-    public double IndicatedAirspeed { get; set; } // New field for IAS.
+    public double IndicatedAirspeed { get; set; }
 }
 
 // The SignalR hub.
