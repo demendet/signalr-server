@@ -50,6 +50,13 @@ public class AircraftData
     public double VelocityBodyX { get; set; }
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
+
+    public double BeaconLights { get; set; }
+public double LandingLights { get; set; }
+public double TaxiLights { get; set; }
+public double NavLights { get; set; }
+public double StrobeLights { get; set; }
+
 }
 
 // The SignalR hub
