@@ -3,21 +3,27 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add console logging.
+// Add console logging
 builder.Logging.AddConsole();
 
-// Add SignalR services with increased buffer size for smoother data flow
+// Add SignalR services with increased buffer size and JSON handling
 builder.Services.AddSignalR(options => {
     options.MaximumReceiveMessageSize = 102400; // 100KB
     options.StreamBufferCapacity = 20; // Increase buffer capacity
+})
+.AddJsonProtocol(options => {
+    // Allow serialization of special floating-point values
+    options.PayloadSerializerOptions.NumberHandling = 
+        JsonNumberHandling.AllowNamedFloatingPointLiterals;
 });
 
 var app = builder.Build();
 
-// Use top-level route registration for the hub.
+// Use top-level route registration for the hub
 app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
