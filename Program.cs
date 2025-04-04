@@ -21,7 +21,7 @@ app.Run();
 
 
 // Define AircraftData as a class with public properties.
-// Note: ParkingBrake is an int to match SimConnect's INT32 "bool" and we include IndicatedAirspeed.
+// Note: Changed ParkingBrake type to int to match the SimConnect INT32 “bool”.
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -36,11 +36,10 @@ public class AircraftData
     public double Rudder { get; set; }
     public double BrakeLeft { get; set; }
     public double BrakeRight { get; set; }
-    public int ParkingBrake { get; set; }  // Changed from double to int.
+    public int ParkingBrake { get; set; } // Changed from double to int.
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
-    public double IndicatedAirspeed { get; set; } // New field for IAS.
 }
 
 // The SignalR hub.
