@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
+using System.Threading.Tasks;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,13 +14,14 @@ builder.Services.AddSignalR();
 
 var app = builder.Build();
 
-// Map the SignalR hub.
+// Use top-level route registration for the hub.
 app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
 
-// DTO for transmitting flight data between host and client.
+// Define AircraftData as a class with public properties.
+// Note: Changed ParkingBrake type to int to match the SimConnect INT32 “bool”.
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -34,11 +36,10 @@ public class AircraftData
     public double Rudder { get; set; }
     public double BrakeLeft { get; set; }
     public double BrakeRight { get; set; }
-    public int ParkingBrake { get; set; } // Represented as int (0 or 1)
+    public int ParkingBrake { get; set; } // Changed from double to int.
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
-    public double IndicatedAirspeed { get; set; }
 }
 
 // The SignalR hub.
