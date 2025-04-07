@@ -5,6 +5,8 @@ using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -15,6 +17,11 @@ builder.Logging.AddConsole();
 builder.Services.AddSignalR(options => {
     options.MaximumReceiveMessageSize = 102400; // 100KB
     options.StreamBufferCapacity = 20; // Increase buffer capacity
+}).AddJsonProtocol(options => {
+    // Configure JSON serialization to handle NaN, Infinity properly
+    options.PayloadSerializerOptions = new JsonSerializerOptions {
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
 });
 
 var app = builder.Build();
@@ -109,12 +116,51 @@ public class CockpitHub : Hub
         // Verify this client has control before broadcasting data
         if (_sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId)
         {
+            // Sanitize data to prevent issues with special floating point values
+            SanitizeData(data);
+            
             // Only log essential info to avoid console spam
             _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
                 sessionCode, data.Altitude, data.GroundSpeed);
                 
             await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
         }
+    }
+    
+    // Helper method to sanitize incoming data
+    private void SanitizeData(AircraftData data)
+    {
+        // Check for NaN or Infinity values and replace with defaults
+        if (double.IsNaN(data.Latitude) || double.IsInfinity(data.Latitude)) data.Latitude = 0;
+        if (double.IsNaN(data.Longitude) || double.IsInfinity(data.Longitude)) data.Longitude = 0;
+        if (double.IsNaN(data.Altitude) || double.IsInfinity(data.Altitude)) data.Altitude = 0;
+        if (double.IsNaN(data.Pitch) || double.IsInfinity(data.Pitch)) data.Pitch = 0;
+        if (double.IsNaN(data.Bank) || double.IsInfinity(data.Bank)) data.Bank = 0;
+        if (double.IsNaN(data.Heading) || double.IsInfinity(data.Heading)) data.Heading = 0;
+        if (double.IsNaN(data.Throttle) || double.IsInfinity(data.Throttle)) data.Throttle = 0;
+        if (double.IsNaN(data.Aileron) || double.IsInfinity(data.Aileron)) data.Aileron = 0;
+        if (double.IsNaN(data.Elevator) || double.IsInfinity(data.Elevator)) data.Elevator = 0;
+        if (double.IsNaN(data.Rudder) || double.IsInfinity(data.Rudder)) data.Rudder = 0;
+        if (double.IsNaN(data.BrakeLeft) || double.IsInfinity(data.BrakeLeft)) data.BrakeLeft = 0;
+        if (double.IsNaN(data.BrakeRight) || double.IsInfinity(data.BrakeRight)) data.BrakeRight = 0;
+        if (double.IsNaN(data.ParkingBrake) || double.IsInfinity(data.ParkingBrake)) data.ParkingBrake = 0;
+        if (double.IsNaN(data.Mixture) || double.IsInfinity(data.Mixture)) data.Mixture = 0;
+        if (double.IsNaN(data.GroundSpeed) || double.IsInfinity(data.GroundSpeed)) data.GroundSpeed = 0;
+        if (double.IsNaN(data.VerticalSpeed) || double.IsInfinity(data.VerticalSpeed)) data.VerticalSpeed = 0;
+        if (double.IsNaN(data.AirspeedTrue) || double.IsInfinity(data.AirspeedTrue)) data.AirspeedTrue = 0;
+        if (double.IsNaN(data.AirspeedIndicated) || double.IsInfinity(data.AirspeedIndicated)) data.AirspeedIndicated = 0;
+        if (double.IsNaN(data.OnGround) || double.IsInfinity(data.OnGround)) data.OnGround = 1;
+        if (double.IsNaN(data.VelocityBodyX) || double.IsInfinity(data.VelocityBodyX)) data.VelocityBodyX = 0;
+        if (double.IsNaN(data.VelocityBodyY) || double.IsInfinity(data.VelocityBodyY)) data.VelocityBodyY = 0;
+        if (double.IsNaN(data.VelocityBodyZ) || double.IsInfinity(data.VelocityBodyZ)) data.VelocityBodyZ = 0;
+        if (double.IsNaN(data.ElevatorTrimPosition) || double.IsInfinity(data.ElevatorTrimPosition)) data.ElevatorTrimPosition = 0;
+        
+        // Sanitize lighting values too
+        if (double.IsNaN(data.LightBeacon) || double.IsInfinity(data.LightBeacon)) data.LightBeacon = 0;
+        if (double.IsNaN(data.LightLanding) || double.IsInfinity(data.LightLanding)) data.LightLanding = 0;
+        if (double.IsNaN(data.LightTaxi) || double.IsInfinity(data.LightTaxi)) data.LightTaxi = 0;
+        if (double.IsNaN(data.LightNav) || double.IsInfinity(data.LightNav)) data.LightNav = 0;
+        if (double.IsNaN(data.LightStrobe) || double.IsInfinity(data.LightStrobe)) data.LightStrobe = 0;
     }
     
     public async Task TransferControl(string sessionCode, bool giving)
