@@ -53,13 +53,6 @@ public class AircraftData
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
     public double ElevatorTrimPosition { get; set; }
-
-    // On the server side, add these properties to the AircraftData class
-public double BeaconLight { get; set; }
-public double LandingLight { get; set; }
-public double TaxiLight { get; set; }
-public double NavLight { get; set; }
-public double StrobeLight { get; set; }
 }
 
 // The SignalR hub
@@ -115,6 +108,17 @@ public class CockpitHub : Hub
                 sessionCode, data.Altitude, data.GroundSpeed);
                 
             await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+        }
+    }
+    
+    // Add the lighting data method
+    public async Task SendLightingData(string sessionCode, object lightingData)
+    {
+        // Verify this client has control before broadcasting
+        if (_sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId)
+        {
+            _logger.LogInformation("Received lighting data from controller in session {SessionCode}", sessionCode);
+            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightingData", lightingData);
         }
     }
     
