@@ -20,7 +20,10 @@ builder.Services.AddSignalR(options => {
 }).AddJsonProtocol(options => {
     // Configure JSON serialization to handle NaN, Infinity properly
     options.PayloadSerializerOptions = new JsonSerializerOptions {
-        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
+        PropertyNamingPolicy = null,    // Preserve property names exactly
+        WriteIndented = false,          // Keep data compact
+        DefaultIgnoreCondition = JsonIgnoreCondition.Never // Send all properties
     };
 });
 
@@ -111,7 +114,7 @@ public class CockpitHub : Hub
         }
     }
 
-    // Method to handle regular AircraftData DTO
+    // Method to handle all formats of aircraft data, always converts to Dictionary<string, double>
     public async Task SendAircraftData(string sessionCode, object data)
     {
         // Verify this client has control before broadcasting data
@@ -119,29 +122,97 @@ public class CockpitHub : Hub
         {
             try
             {
-                AircraftData aircraftData;
+                Dictionary<string, double> simpleData;
                 
-                // Check if the data is a dictionary (fallback mechanism)
-                if (data is Dictionary<string, object> dict)
+                // If we already have a Dictionary<string, double>, use it directly
+                if (data is Dictionary<string, double> typedDict)
                 {
-                    aircraftData = ConvertDictionaryToAircraftData(dict);
+                    simpleData = typedDict;
                 }
+                // For Dictionary<string, object>, convert each value to double
+                else if (data is Dictionary<string, object> objectDict)
+                {
+                    simpleData = new Dictionary<string, double>();
+                    foreach (var kvp in objectDict)
+                    {
+                        if (kvp.Value != null)
+                        {
+                            try 
+                            {
+                                double value = Convert.ToDouble(kvp.Value);
+                                simpleData[kvp.Key] = double.IsNaN(value) || double.IsInfinity(value) ? 0.0 : value;
+                            }
+                            catch
+                            {
+                                // If conversion fails, use 0
+                                simpleData[kvp.Key] = 0.0;
+                            }
+                        }
+                    }
+                }
+                // For any other object, serialize to JSON then deserialize to dictionary
                 else
                 {
-                    // Try to convert to AircraftData
-                    aircraftData = data is AircraftData typedData 
-                        ? typedData 
-                        : JsonSerializer.Deserialize<AircraftData>(JsonSerializer.Serialize(data));
+                    try
+                    {
+                        simpleData = new Dictionary<string, double>();
+                        string json = JsonSerializer.Serialize(data, new JsonSerializerOptions 
+                        { 
+                            PropertyNamingPolicy = null,
+                            NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+                        });
+                        
+                        var tempDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
+                        foreach (var kvp in tempDict)
+                        {
+                            try
+                            {
+                                if (kvp.Value.ValueKind == JsonValueKind.Number)
+                                {
+                                    double value = kvp.Value.GetDouble();
+                                    simpleData[kvp.Key] = double.IsNaN(value) || double.IsInfinity(value) ? 0.0 : value;
+                                }
+                                else if (kvp.Value.ValueKind == JsonValueKind.True)
+                                {
+                                    simpleData[kvp.Key] = 1.0;
+                                }
+                                else if (kvp.Value.ValueKind == JsonValueKind.False)
+                                {
+                                    simpleData[kvp.Key] = 0.0;
+                                }
+                                else
+                                {
+                                    simpleData[kvp.Key] = 0.0;
+                                }
+                            }
+                            catch
+                            {
+                                simpleData[kvp.Key] = 0.0;
+                            }
+                        }
+                    }
+                    catch (Exception jsonEx)
+                    {
+                        _logger.LogError(jsonEx, "Error serializing aircraft data in session {SessionCode}", sessionCode);
+                        // Create a minimal dataset in case of error
+                        simpleData = new Dictionary<string, double>
+                        {
+                            { "Latitude", 0 },
+                            { "Longitude", 0 },
+                            { "Altitude", 0 },
+                            { "OnGround", 1 }
+                        };
+                    }
                 }
-                
-                // Sanitize data to prevent issues with special floating point values
-                SanitizeData(aircraftData);
                 
                 // Only log essential info to avoid console spam
                 _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
-                    sessionCode, aircraftData.Altitude, aircraftData.GroundSpeed);
-                    
-                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", aircraftData);
+                    sessionCode, 
+                    simpleData.GetValueOrDefault("Altitude", 0), 
+                    simpleData.GetValueOrDefault("GroundSpeed", 0));
+                
+                // Always send a Dictionary<string, double> for maximum compatibility
+                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", simpleData);
             }
             catch (Exception ex)
             {
