@@ -24,7 +24,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// Enhanced AircraftData class with physics properties
+// Enhanced AircraftData class with physics properties and lighting
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -53,6 +53,12 @@ public class AircraftData
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
     public double ElevatorTrimPosition { get; set; }
+    // Lighting properties
+    public double LightBeacon { get; set; }
+    public double LightLanding { get; set; }
+    public double LightTaxi { get; set; }
+    public double LightNav { get; set; }
+    public double LightStrobe { get; set; }
 }
 
 // The SignalR hub
@@ -108,17 +114,6 @@ public class CockpitHub : Hub
                 sessionCode, data.Altitude, data.GroundSpeed);
                 
             await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
-        }
-    }
-    
-    // Add the lighting data method
-    public async Task SendLightingData(string sessionCode, object lightingData)
-    {
-        // Verify this client has control before broadcasting
-        if (_sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId)
-        {
-            _logger.LogInformation("Received lighting data from controller in session {SessionCode}", sessionCode);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightingData", lightingData);
         }
     }
     
