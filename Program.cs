@@ -61,7 +61,7 @@ public class AircraftData
     // -------------------------------
     // NEW: LightBeacon property added
     // -------------------------------
-    public double LightBeacon { get; set; }
+    public int LightBeacon { get; set; }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
