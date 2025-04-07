@@ -54,7 +54,7 @@ public class AircraftData
     public double VelocityBodyZ { get; set; }
     public double ElevatorTrimPosition { get; set; }
 
-    public int LightBeacon { get; set; }
+    public double LightBeacon { get; set; }
 }
 
 // The SignalR hub
