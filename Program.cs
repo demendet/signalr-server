@@ -111,20 +111,85 @@ public class CockpitHub : Hub
         }
     }
 
-    public async Task SendAircraftData(string sessionCode, AircraftData data)
+    // Method to handle regular AircraftData DTO
+    public async Task SendAircraftData(string sessionCode, object data)
     {
         // Verify this client has control before broadcasting data
         if (_sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId)
         {
-            // Sanitize data to prevent issues with special floating point values
-            SanitizeData(data);
-            
-            // Only log essential info to avoid console spam
-            _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
-                sessionCode, data.Altitude, data.GroundSpeed);
+            try
+            {
+                AircraftData aircraftData;
                 
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+                // Check if the data is a dictionary (fallback mechanism)
+                if (data is Dictionary<string, object> dict)
+                {
+                    aircraftData = ConvertDictionaryToAircraftData(dict);
+                }
+                else
+                {
+                    // Try to convert to AircraftData
+                    aircraftData = data is AircraftData typedData 
+                        ? typedData 
+                        : JsonSerializer.Deserialize<AircraftData>(JsonSerializer.Serialize(data));
+                }
+                
+                // Sanitize data to prevent issues with special floating point values
+                SanitizeData(aircraftData);
+                
+                // Only log essential info to avoid console spam
+                _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
+                    sessionCode, aircraftData.Altitude, aircraftData.GroundSpeed);
+                    
+                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", aircraftData);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing aircraft data in session {SessionCode}", sessionCode);
+            }
         }
+    }
+    
+    // Helper method to convert dictionary to AircraftData
+    private AircraftData ConvertDictionaryToAircraftData(Dictionary<string, object> dict)
+    {
+        var data = new AircraftData();
+        
+        // Set properties from dictionary if they exist
+        if (dict.TryGetValue("Latitude", out var lat) && lat != null) data.Latitude = Convert.ToDouble(lat);
+        if (dict.TryGetValue("Longitude", out var lon) && lon != null) data.Longitude = Convert.ToDouble(lon);
+        if (dict.TryGetValue("Altitude", out var alt) && alt != null) data.Altitude = Convert.ToDouble(alt);
+        if (dict.TryGetValue("Pitch", out var pitch) && pitch != null) data.Pitch = Convert.ToDouble(pitch);
+        if (dict.TryGetValue("Bank", out var bank) && bank != null) data.Bank = Convert.ToDouble(bank);
+        if (dict.TryGetValue("Heading", out var heading) && heading != null) data.Heading = Convert.ToDouble(heading);
+        if (dict.TryGetValue("Throttle", out var throttle) && throttle != null) data.Throttle = Convert.ToDouble(throttle);
+        if (dict.TryGetValue("Aileron", out var aileron) && aileron != null) data.Aileron = Convert.ToDouble(aileron);
+        if (dict.TryGetValue("Elevator", out var elevator) && elevator != null) data.Elevator = Convert.ToDouble(elevator);
+        if (dict.TryGetValue("Rudder", out var rudder) && rudder != null) data.Rudder = Convert.ToDouble(rudder);
+        if (dict.TryGetValue("BrakeLeft", out var brakeLeft) && brakeLeft != null) data.BrakeLeft = Convert.ToDouble(brakeLeft);
+        if (dict.TryGetValue("BrakeRight", out var brakeRight) && brakeRight != null) data.BrakeRight = Convert.ToDouble(brakeRight);
+        if (dict.TryGetValue("ParkingBrake", out var parkingBrake) && parkingBrake != null) data.ParkingBrake = Convert.ToDouble(parkingBrake);
+        if (dict.TryGetValue("Mixture", out var mixture) && mixture != null) data.Mixture = Convert.ToDouble(mixture);
+        if (dict.TryGetValue("Flaps", out var flaps) && flaps != null) data.Flaps = Convert.ToInt32(flaps);
+        if (dict.TryGetValue("Gear", out var gear) && gear != null) data.Gear = Convert.ToInt32(gear);
+        if (dict.TryGetValue("GroundSpeed", out var groundSpeed) && groundSpeed != null) data.GroundSpeed = Convert.ToDouble(groundSpeed);
+        if (dict.TryGetValue("VerticalSpeed", out var verticalSpeed) && verticalSpeed != null) data.VerticalSpeed = Convert.ToDouble(verticalSpeed);
+        if (dict.TryGetValue("AirspeedTrue", out var airspeedTrue) && airspeedTrue != null) data.AirspeedTrue = Convert.ToDouble(airspeedTrue);
+        if (dict.TryGetValue("AirspeedIndicated", out var airspeedIndicated) && airspeedIndicated != null) data.AirspeedIndicated = Convert.ToDouble(airspeedIndicated);
+        if (dict.TryGetValue("OnGround", out var onGround) && onGround != null) data.OnGround = Convert.ToDouble(onGround);
+        if (dict.TryGetValue("VelocityBodyX", out var velocityBodyX) && velocityBodyX != null) data.VelocityBodyX = Convert.ToDouble(velocityBodyX);
+        if (dict.TryGetValue("VelocityBodyY", out var velocityBodyY) && velocityBodyY != null) data.VelocityBodyY = Convert.ToDouble(velocityBodyY);
+        if (dict.TryGetValue("VelocityBodyZ", out var velocityBodyZ) && velocityBodyZ != null) data.VelocityBodyZ = Convert.ToDouble(velocityBodyZ);
+        if (dict.TryGetValue("ElevatorTrimPosition", out var elevatorTrimPosition) && elevatorTrimPosition != null) data.ElevatorTrimPosition = Convert.ToDouble(elevatorTrimPosition);
+        
+        // Lighting properties
+        if (dict.TryGetValue("LightBeacon", out var lightBeacon) && lightBeacon != null) data.LightBeacon = Convert.ToDouble(lightBeacon);
+        if (dict.TryGetValue("LightLanding", out var lightLanding) && lightLanding != null) data.LightLanding = Convert.ToDouble(lightLanding);
+        if (dict.TryGetValue("LightTaxi", out var lightTaxi) && lightTaxi != null) data.LightTaxi = Convert.ToDouble(lightTaxi);
+        if (dict.TryGetValue("LightNav", out var lightNav) && lightNav != null) data.LightNav = Convert.ToDouble(lightNav);
+        if (dict.TryGetValue("LightStrobe", out var lightStrobe) && lightStrobe != null) data.LightStrobe = Convert.ToDouble(lightStrobe);
+        
+        return data;
     }
     
     // Helper method to sanitize incoming data
