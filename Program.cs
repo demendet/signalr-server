@@ -24,11 +24,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// ---------------------------------------------------------------------------------------------------------------------
-// This is your enhanced AircraftData class that is used on the server side.
-// NOTE: The important change is that we’ve added the property "LightBeacon" so that
-// the SignalR server will receive and forward this value.
-// ---------------------------------------------------------------------------------------------------------------------
+// Enhanced AircraftData class with physics properties
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -57,16 +53,11 @@ public class AircraftData
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
     public double ElevatorTrimPosition { get; set; }
-    
-    // -------------------------------
-    // NEW: LightBeacon property added
-    // -------------------------------
+
     public int LightBeacon { get; set; }
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// This is your SignalR hub for the shared cockpit
-// ---------------------------------------------------------------------------------------------------------------------
+// The SignalR hub
 public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
@@ -115,8 +106,8 @@ public class CockpitHub : Hub
         if (_sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId)
         {
             // Only log essential info to avoid console spam
-            _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, Beacon={LightBeacon}", 
-                sessionCode, data.Altitude, data.GroundSpeed, data.LightBeacon);
+            _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
+                sessionCode, data.Altitude, data.GroundSpeed);
                 
             await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
         }
