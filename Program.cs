@@ -24,7 +24,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// Enhanced AircraftData class with physics properties
+// Enhanced AircraftData class with physics properties and lighting
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -53,6 +53,12 @@ public class AircraftData
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
     public double ElevatorTrimPosition { get; set; }
+    // Lighting properties
+    public double BeaconLight { get; set; }
+    public double LandingLight { get; set; }
+    public double TaxiLight { get; set; }
+    public double NavLight { get; set; }
+    public double StrobeLight { get; set; }
 }
 
 // The SignalR hub
