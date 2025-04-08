@@ -163,6 +163,15 @@ public class CockpitHub : Hub
             }
         }
     }
+
+    public async Task SendLightStates(string sessionCode, LightStatesDto lights)
+{
+    _logger.LogInformation("Received light states in session {SessionCode}: B={Beacon}, L={Landing}, T={Taxi}, N={Nav}, S={Strobe}", 
+        sessionCode, lights.LightBeacon, lights.LightLanding, lights.LightTaxi, lights.LightNav, lights.LightStrobe);
+    
+    // Send to all other clients in the session
+    await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightStates", lights);
+}
     
     public override async Task OnDisconnectedAsync(Exception exception)
     {
