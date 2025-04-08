@@ -24,8 +24,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// Enhanced AircraftData class with physics properties
-// Enhanced AircraftData class with physics properties and lights for server
+// Enhanced AircraftData class with physics properties and lights
 public class AircraftData
 {
     public double Latitude { get; set; }
@@ -61,6 +60,16 @@ public class AircraftData
     public double LightTaxi { get; set; }     // 0.0 = OFF, 1.0 = ON
     public double LightNav { get; set; }      // 0.0 = OFF, 1.0 = ON
     public double LightStrobe { get; set; }   // 0.0 = OFF, 1.0 = ON
+}
+
+// DTO for light states
+public class LightStatesDto
+{
+    public bool LightBeacon { get; set; }
+    public bool LightLanding { get; set; }
+    public bool LightTaxi { get; set; }
+    public bool LightNav { get; set; }
+    public bool LightStrobe { get; set; }
 }
 
 // The SignalR hub
@@ -117,6 +126,15 @@ public class CockpitHub : Hub
                 
             await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
         }
+    }
+    
+    public async Task SendLightStates(string sessionCode, LightStatesDto lights)
+    {
+        _logger.LogInformation("Received light states from client in session {SessionCode}: B={Beacon}, L={Landing}, T={Taxi}, N={Nav}, S={Strobe}", 
+            sessionCode, lights.LightBeacon, lights.LightLanding, lights.LightTaxi, lights.LightNav, lights.LightStrobe);
+        
+        // Send to all other clients in the session
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightStates", lights);
     }
     
     public async Task TransferControl(string sessionCode, bool giving)
