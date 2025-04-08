@@ -1,10 +1,40 @@
 using Microsoft.AspNetCore.SignalR;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.Text.Json;
-using DualLInkNet.Models;
+using System.Linq;
 
-namespace DualLInkNet
+var builder = WebApplication.CreateBuilder(args);
+
+// Add SignalR services
+builder.Services.AddSignalR()
+    .AddJsonProtocol(options => {
+        // Preserve object references (important for complex models)
+        options.PayloadSerializerOptions.PropertyNamingPolicy = null;
+    });
+
+// Add CORS
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyHeader()
+              .AllowAnyMethod()
+              .SetIsOriginAllowed(origin => true) // Allow any origin for demonstration
+              .AllowCredentials();
+    });
+});
+
+var app = builder.Build();
+
+app.UseCors();
+app.UseRouting();
+
+// Use top-level route registration for the hub.
+app.MapHub<FlightHub>("/sharedcockpithub");
+
+app.Run();
+
+namespace SignalRServer
 {
     // This represents the server code running on Railway
     public class FlightHub : Hub
@@ -122,7 +152,7 @@ namespace DualLInkNet
             }
         }
 
-        public override async Task OnDisconnectedAsync(Exception exception)
+        public override Task OnDisconnectedAsync(Exception exception)
         {
             string connectionId = Context.ConnectionId;
             
@@ -141,7 +171,7 @@ namespace DualLInkNet
                         if (!string.IsNullOrEmpty(newController))
                         {
                             controllerConnections[sessionCode] = newController;
-                            await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                            Clients.Client(newController).SendAsync("ControlStatusChanged", true).GetAwaiter().GetResult();
                         }
                     }
 
@@ -157,10 +187,10 @@ namespace DualLInkNet
                 connectionIdToSession.Remove(connectionId);
                 
                 // Notify others in the session about the disconnect
-                await Clients.Group(sessionCode).SendAsync("ClientDisconnected", connectionId);
+                Clients.Group(sessionCode).SendAsync("ClientDisconnected", connectionId).GetAwaiter().GetResult();
             }
             
-            await base.OnDisconnectedAsync(exception);
+            return base.OnDisconnectedAsync(exception);
         }
     }
-} 
+}
