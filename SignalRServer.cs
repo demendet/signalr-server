@@ -1,208 +1,204 @@
-// Set up nullable context
-#nullable enable
-
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
-using System;
+using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
 
-// Configure web host builder
 var builder = WebApplication.CreateBuilder(args);
 
-// Add SignalR services with increased buffer size for flight sim data
+// Add console logging.
+builder.Logging.AddConsole();
+
+// Add SignalR services with increased buffer size for smoother data flow
 builder.Services.AddSignalR(options => {
-    options.MaximumReceiveMessageSize = 102400; // 100KB for large aircraft data packets
-})
-.AddJsonProtocol(options => {
-    // Preserve object references and property names
-    options.PayloadSerializerOptions.PropertyNamingPolicy = null;
+    options.MaximumReceiveMessageSize = 102400; // 100KB
+    options.StreamBufferCapacity = 20; // Increase buffer capacity
 });
 
-// Add CORS to allow any domain to connect
-builder.Services.AddCors(options =>
-{
-    options.AddDefaultPolicy(policy =>
-    {
-        policy.AllowAnyHeader()
-              .AllowAnyMethod()
-              .SetIsOriginAllowed(_ => true) // Allow any origin
-              .AllowCredentials();
-    });
-});
-
-// Build the app
 var app = builder.Build();
 
-// Configure middleware
-app.UseCors();
-app.UseRouting();
+// Use top-level route registration for the hub.
+app.MapHub<CockpitHub>("/sharedcockpithub");
 
-// Configure SignalR hub
-app.MapHub<FlightHub>("/sharedcockpithub");
-
-// Add a simple status page at the root
-app.MapGet("/", () => "DualLinkNet Flight Simulator Shared Cockpit Server is running!");
-
-// Run the app
 app.Run();
 
-// Hub implementation
-public class FlightHub : Hub
+// Enhanced AircraftData class with physics properties
+public class AircraftData
 {
-    private static readonly Dictionary<string, string> sessionToConnectionId = new();
-    private static readonly Dictionary<string, string> connectionIdToSession = new();
-    private static readonly Dictionary<string, HashSet<string>> sessionClients = new();
-    private static readonly Dictionary<string, string> controllerConnections = new();
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public double Altitude { get; set; }
+    public double Pitch { get; set; }
+    public double Bank { get; set; }
+    public double Heading { get; set; }
+    public double Throttle { get; set; }
+    public double Aileron { get; set; }
+    public double Elevator { get; set; }
+    public double Rudder { get; set; }
+    public double BrakeLeft { get; set; }
+    public double BrakeRight { get; set; }
+    public double ParkingBrake { get; set; } // Keep as double for consistency with client
+    public double Mixture { get; set; }
+    public int Flaps { get; set; }
+    public int Gear { get; set; }
+    // Physics properties
+    public double GroundSpeed { get; set; }
+    public double VerticalSpeed { get; set; }
+    public double AirspeedTrue { get; set; }
+    public double AirspeedIndicated { get; set; }
+    public double OnGround { get; set; }
+    public double VelocityBodyX { get; set; }
+    public double VelocityBodyY { get; set; }
+    public double VelocityBodyZ { get; set; }
+    public double ElevatorTrimPosition { get; set; }
 
-    public async Task JoinSession(string sessionCode, bool isHost)
+    public double LightBeacon { get; set; }
+}
+
+// The SignalR hub
+public class CockpitHub : Hub
+{
+    private readonly ILogger<CockpitHub> _logger;
+    private static readonly Dictionary<string, string> _sessionControlMap = new();
+    private static readonly Dictionary<string, List<string>> _sessionConnections = new();
+
+    public CockpitHub(ILogger<CockpitHub> logger)
     {
-        string normalizedCode = sessionCode.ToLower().Trim();
-        string connectionId = Context.ConnectionId;
+        _logger = logger;
+    }
 
-        // Create a new session if one doesn't exist
-        if (!sessionClients.ContainsKey(normalizedCode))
+    public async Task JoinSession(string sessionCode)
+    {
+        _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", Context.ConnectionId, sessionCode);
+        await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
+        
+        // Track connections in the session
+        if (!_sessionConnections.ContainsKey(sessionCode))
         {
-            sessionClients[normalizedCode] = new HashSet<string>();
+            _sessionConnections[sessionCode] = new List<string>();
         }
-
-        // Add this connection to the session
-        sessionClients[normalizedCode].Add(connectionId);
-        connectionIdToSession[connectionId] = normalizedCode;
-
-        // If this is the host, store their connection ID
-        if (isHost)
+        _sessionConnections[sessionCode].Add(Context.ConnectionId);
+        
+        // By default, the first connection (host) has control
+        if (!_sessionControlMap.ContainsKey(sessionCode))
         {
-            sessionToConnectionId[normalizedCode] = connectionId;
-            
-            // Host automatically gets control first
-            controllerConnections[normalizedCode] = connectionId;
-            
-            // Inform the host they have control
+            _sessionControlMap[sessionCode] = Context.ConnectionId;
+            // Inform the client they have control (host always starts with control)
             await Clients.Caller.SendAsync("ControlStatusChanged", true);
+            _logger.LogInformation("Initial control assigned to {ControlId} in session {SessionCode}", 
+                Context.ConnectionId, sessionCode);
         }
         else
         {
-            // Inform client they don't have control
-            await Clients.Caller.SendAsync("ControlStatusChanged", false);
-        }
-
-        // Notify everyone in the session about the join
-        await Clients.Group(normalizedCode).SendAsync("ClientJoined", connectionId);
-
-        // Add connection to the session group
-        await Groups.AddToGroupAsync(connectionId, normalizedCode);
-
-        await Clients.Caller.SendAsync("JoinedSession", normalizedCode);
-    }
-
-    public async Task SendAircraftData(object data)
-    {
-        if (!connectionIdToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-
-        // Check if this client has control privileges
-        if (!controllerConnections.TryGetValue(sessionCode, out string? controllerConnectionId) || 
-            controllerConnectionId != Context.ConnectionId)
-        {
-            // This client doesn't have control - ignore their data
-            return;
-        }
-
-        // Forward the data exactly as received, including all properties (lights, etc.)
-        // to everyone in the session except the sender
-        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
-    }
-
-    public async Task TransferControl(bool givingControl)
-    {
-        if (!connectionIdToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-            
-        // Verify this session exists
-        if (!sessionClients.TryGetValue(sessionCode, out HashSet<string>? clients) || clients.Count < 2)
-        {
-            // Session doesn't exist or only one client
-            return;
-        }
-
-        // Get the current controller
-        if (controllerConnections.TryGetValue(sessionCode, out string? controllerConnectionId))
-        {
-            if (givingControl)
-            {
-                // If current controller is giving up control
-                if (controllerConnectionId == Context.ConnectionId)
-                {
-                    // Find the first available client other than the current controller
-                    string? newController = clients.FirstOrDefault(c => c != Context.ConnectionId);
-                    if (!string.IsNullOrEmpty(newController))
-                    {
-                        // Transfer control to the other client
-                        controllerConnections[sessionCode] = newController;
-                        
-                        // Notify participants of the change
-                        await Clients.Client(controllerConnectionId).SendAsync("ControlStatusChanged", false);
-                        await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
-                    }
-                }
-            }
-            else // Taking control
-            {
-                // If someone is requesting control and they don't have it
-                if (controllerConnectionId != Context.ConnectionId)
-                {
-                    // Remove control from current controller
-                    await Clients.Client(controllerConnectionId).SendAsync("ControlStatusChanged", false);
-                    
-                    // Give control to the requester
-                    controllerConnections[sessionCode] = Context.ConnectionId;
-                    await Clients.Caller.SendAsync("ControlStatusChanged", true);
-                }
-            }
+            // Inform joining client about current control status
+            bool hasControl = _sessionControlMap[sessionCode] == Context.ConnectionId;
+            await Clients.Caller.SendAsync("ControlStatusChanged", hasControl);
+            _logger.LogInformation("Notified joining client {ClientId} of control status ({HasControl}) in session {SessionCode}", 
+                Context.ConnectionId, hasControl, sessionCode);
         }
     }
 
-    public override Task OnDisconnectedAsync(Exception? exception)
+    public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
-        string connectionId = Context.ConnectionId;
-        
-        if (connectionIdToSession.TryGetValue(connectionId, out string? sessionCode))
+        // Verify this client has control before broadcasting data
+        if (_sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId)
         {
-            // Remove from session clients
-            if (sessionClients.TryGetValue(sessionCode, out HashSet<string>? clients))
-            {
-                clients.Remove(connectionId);
+            // Only log essential info to avoid console spam
+            _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
+                sessionCode, data.Altitude, data.GroundSpeed);
                 
-                // If this was the controller, transfer control
-                if (controllerConnections.TryGetValue(sessionCode, out string? controllerConnection) &&
-                    controllerConnection == connectionId)
+            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+        }
+    }
+    
+    public async Task TransferControl(string sessionCode, bool giving)
+    {
+        string currentController = _sessionControlMap.GetValueOrDefault(sessionCode, "");
+        
+        if (giving) // Host is giving control
+        {
+            if (currentController == Context.ConnectionId)
+            {
+                // Find other clients in this session
+                var otherConnections = _sessionConnections[sessionCode]
+                    .Where(id => id != Context.ConnectionId)
+                    .ToList();
+                    
+                if (otherConnections.Any())
                 {
-                    string? newController = clients.FirstOrDefault();
-                    if (!string.IsNullOrEmpty(newController))
-                    {
-                        controllerConnections[sessionCode] = newController;
-                        Clients.Client(newController).SendAsync("ControlStatusChanged", true).GetAwaiter().GetResult();
-                    }
+                    var newController = otherConnections.First();
+                    _sessionControlMap[sessionCode] = newController;
+                    
+                    // Notify both parties
+                    await Clients.Caller.SendAsync("ControlStatusChanged", false);
+                    await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                    
+                    _logger.LogInformation("Control transferred from {OldId} to {NewId} in session {SessionCode}", 
+                        Context.ConnectionId, newController, sessionCode);
                 }
-
-                // If session is empty, clean up
-                if (clients.Count == 0)
+            }
+        }
+        else // Client is taking control
+        {
+            if (currentController != Context.ConnectionId)
+            {
+                var oldController = currentController;
+                _sessionControlMap[sessionCode] = Context.ConnectionId;
+                
+                // Notify both parties
+                await Clients.Caller.SendAsync("ControlStatusChanged", true);
+                if (!string.IsNullOrEmpty(oldController))
+                    await Clients.Client(oldController).SendAsync("ControlStatusChanged", false);
+                
+                _logger.LogInformation("Control taken by {NewId} from {OldId} in session {SessionCode}", 
+                    Context.ConnectionId, oldController, sessionCode);
+            }
+        }
+    }
+    
+    public override async Task OnDisconnectedAsync(Exception exception)
+    {
+        // Find any sessions this client is part of
+        var sessions = _sessionConnections
+            .Where(kvp => kvp.Value.Contains(Context.ConnectionId))
+            .Select(kvp => kvp.Key)
+            .ToList();
+            
+        foreach (var session in sessions)
+        {
+            // Remove client from the session
+            _sessionConnections[session].Remove(Context.ConnectionId);
+            
+            // If this was the controlling client, reassign control
+            if (_sessionControlMap.GetValueOrDefault(session) == Context.ConnectionId)
+            {
+                if (_sessionConnections[session].Any())
                 {
-                    sessionClients.Remove(sessionCode);
-                    sessionToConnectionId.Remove(sessionCode);
-                    controllerConnections.Remove(sessionCode);
+                    var newController = _sessionConnections[session].First();
+                    _sessionControlMap[session] = newController;
+                    await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                    _logger.LogInformation("Control automatically transferred to {NewId} after disconnect in session {SessionCode}", 
+                        newController, session);
+                }
+                else
+                {
+                    // If no other connections, remove the session
+                    _sessionControlMap.Remove(session);
+                    _sessionConnections.Remove(session);
+                    _logger.LogInformation("Session {SessionCode} removed as all clients disconnected", session);
                 }
             }
             
-            connectionIdToSession.Remove(connectionId);
-            
-            // Notify others in the session about the disconnect
-            Clients.Group(sessionCode).SendAsync("ClientDisconnected", connectionId).GetAwaiter().GetResult();
+            // If session is empty, clean up
+            if (!_sessionConnections[session].Any())
+            {
+                _sessionConnections.Remove(session);
+                _sessionControlMap.Remove(session);
+            }
         }
         
-        return base.OnDisconnectedAsync(exception);
+        await base.OnDisconnectedAsync(exception);
     }
 }
