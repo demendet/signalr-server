@@ -81,6 +81,12 @@ public class PitotHeatStateDto
     public bool PitotHeatOn { get; set; }
 }
 
+// DTO for G1000 softkey press
+public class G1000SoftkeyPressDto
+{
+    public int SoftkeyNumber { get; set; }
+}
+
 // The SignalR hub
 public class CockpitHub : Hub
 {
@@ -123,7 +129,7 @@ public class CockpitHub : Hub
                 Context.ConnectionId, hasControl, sessionCode);
         }
     }
-
+    
     public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
         // Verify this client has control before broadcasting data
@@ -153,6 +159,15 @@ public class CockpitHub : Hub
         
         // Send to all other clients in the session
         await Clients.OthersInGroup(sessionCode).SendAsync("ReceivePitotHeatState", state);
+    }
+    
+    public async Task SendG1000SoftkeyPress(string sessionCode, G1000SoftkeyPressDto press)
+    {
+        _logger.LogInformation("Received G1000 softkey press from client in session {SessionCode}: SoftkeyNumber={Number}", 
+            sessionCode, press.SoftkeyNumber);
+        
+        // Send to all other clients in the session
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveG1000SoftkeyPress", press);
     }
     
     public async Task TransferControl(string sessionCode, bool giving)
