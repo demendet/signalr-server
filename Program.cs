@@ -43,7 +43,7 @@ app.UseHttpsRedirection();
 
 // Map routes
 app.MapGet("/", () => "G1000 Signaling Server Running");
-app.MapHub<G1000SignalingHub>("/g1000signalhub");
+app.MapHub<G1000SignalingHub>("/sharedcockpithub");
 
 app.Run();
 
