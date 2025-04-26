@@ -3,9 +3,8 @@ using System.Collections.Concurrent;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure Kestrel to use the PORT environment variable for Railway
-var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
-builder.WebHost.UseUrls($"http://+:{port}");
+// Configure Kestrel to use port 3000 for Railway's internal routing
+builder.WebHost.UseUrls("http://+:3000");
 
 // Add CORS support
 builder.Services.AddCors(options =>
@@ -31,8 +30,14 @@ builder.Services.AddLogging();
 
 var app = builder.Build();
 
-// Configure middleware
+// Configure middleware - order is important
 app.UseCors();
+
+// Add WebSockets support
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromMinutes(2)
+});
 
 // Map routes
 app.MapGet("/", () => "G1000 Signaling Server Running");
