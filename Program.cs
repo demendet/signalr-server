@@ -12,16 +12,10 @@ builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.AllowAnyOrigin()
+        policy.SetIsOriginAllowed(_ => true)
               .AllowAnyMethod()
-              .AllowAnyHeader();
-        
-        // Note: When using AllowAnyOrigin, you cannot use AllowCredentials
-        // If you need to allow credentials, use specific origins instead:
-        // policy.WithOrigins("https://your-client-domain.com", "http://localhost:3000")
-        //      .AllowAnyMethod()
-        //      .AllowAnyHeader()
-        //      .AllowCredentials();
+              .AllowAnyHeader()
+              .AllowCredentials();
     });
 });
 
@@ -39,7 +33,6 @@ var app = builder.Build();
 
 // Configure middleware
 app.UseCors();
-app.UseHttpsRedirection();
 
 // Map routes
 app.MapGet("/", () => "G1000 Signaling Server Running");
