@@ -3,6 +3,10 @@ using System.Collections.Concurrent;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Configure Kestrel to use the PORT environment variable for Railway
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+builder.WebHost.UseUrls($"http://+:{port}");
+
 // Add CORS support
 builder.Services.AddCors(options =>
 {
@@ -10,8 +14,14 @@ builder.Services.AddCors(options =>
     {
         policy.AllowAnyOrigin()
               .AllowAnyMethod()
-              .AllowAnyHeader()
-              
+              .AllowAnyHeader();
+        
+        // Note: When using AllowAnyOrigin, you cannot use AllowCredentials
+        // If you need to allow credentials, use specific origins instead:
+        // policy.WithOrigins("https://your-client-domain.com", "http://localhost:3000")
+        //      .AllowAnyMethod()
+        //      .AllowAnyHeader()
+        //      .AllowCredentials();
     });
 });
 
