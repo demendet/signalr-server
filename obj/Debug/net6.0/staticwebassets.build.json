@@ -1,0 +1,12 @@
+{
+  "Version": 1,
+  "Hash": "+kzegj+iypTdohKYZvkxiK3rWD+fF9Q0BvkICi2dFfc=",
+  "Source": "G1000SignalingServer",
+  "BasePath": "_content/G1000SignalingServer",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [],
+  "Assets": [],
+  "Endpoints": []
+}

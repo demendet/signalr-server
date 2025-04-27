@@ -117,12 +117,12 @@ public class G1000SignalingHub : Hub
     }
 
     // Send generic G1000 control messages
-    public async Task SendG1000Control(string roomId, string controlName)
+    public async Task SendG1000Control(string roomId, string controlData)
     {
-        _logger.LogInformation("User {ConnectionId} activated control {ControlName} in room {RoomId}", 
-            Context.ConnectionId, controlName, roomId);
+        _logger.LogInformation("User {ConnectionId} sent control data {ControlData} in room {RoomId}", 
+            Context.ConnectionId, controlData, roomId);
         
-        await Clients.OthersInGroup(roomId).SendAsync("ReceiveG1000Control", controlName);
+        await Clients.OthersInGroup(roomId).SendAsync("ReceiveG1000Control", controlData);
     }
 
     // Handle G1000 knob rotation
