@@ -1,6 +1,35 @@
 # G1000 Signaling Server
 
-This is a signaling server used to facilitate WebRTC peer-to-peer connections for the G1000 Cockpit Synchronization system. It serves as the initial connection point for clients to discover each other and exchange WebRTC connection details.
+This is a SignalR-based signaling server for WebRTC connections in the G1000 Shared Cockpit application.
+
+## Important
+
+**The signaling server MUST be running for the WebRTC connections to work properly!**
+
+## How to Run
+
+1. Open a command prompt and navigate to the G1000SignalingServer folder
+2. Run the server with:
+   ```
+   dotnet run
+   ```
+3. Alternatively, use the provided batch file in the parent directory:
+   ```
+   run_signaling_server.bat
+   ```
+
+## Connection Details
+
+- The server runs on port 3000 by default
+- The SignalR hub endpoint is: `http://localhost:3000/sharedcockpithub`
+- Make sure this URL matches what's configured in the main application
+
+## Troubleshooting
+
+- Check that the server is running before trying to connect the main application
+- Look for log messages in the console
+- If you get connection errors, ensure no other application is using port 3000
+- If needed, you can modify the port in Program.cs and update the connection URL in the main application
 
 ## Overview
 

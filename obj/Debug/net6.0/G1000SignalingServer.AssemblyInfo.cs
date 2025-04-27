@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("G1000SignalingServer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+83a2bfe28e56fc128474fa03dcb68a8b137ea942")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f8be56646f39df291290e49ccac4727257c59603")]
 [assembly: System.Reflection.AssemblyProductAttribute("G1000SignalingServer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("G1000SignalingServer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
