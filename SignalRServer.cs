@@ -55,7 +55,32 @@ public class AircraftPositionData
     public double VerticalSpeed { get; set; }
     public double AirspeedTrue { get; set; }
     public double AirspeedIndicated { get; set; }
-}
+    
+    // Control surfaces
+    public double Aileron { get; set; }
+    public double Elevator { get; set; }
+    public double Rudder { get; set; }
+    public double ElevatorTrim { get; set; }
+    public double FlapsHandlePosition { get; set; }
+    
+    // Brakes
+    public double BrakeLeftPosition { get; set; }
+    public double BrakeRightPosition { get; set; }
+    public double ParkingBrakePosition { get; set; }
+    
+    // Engine controls
+    public double Throttle { get; set; }
+    public double MixturePosition { get; set; }
+    
+    // Gear
+    public int GearHandlePosition { get; set; }
+    
+    // Motion data
+    public double OnGround { get; set; }
+    public double VelocityBodyX { get; set; }
+    public double VelocityBodyY { get; set; }
+    public double VelocityBodyZ { get; set; }
+} 
 
 // Dynamic variable change DTO
 public class VariableChangeDto
