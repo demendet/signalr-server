@@ -139,6 +139,9 @@ public class DynamicVariableHub : Hub
     // Track ground state for each session
     private static readonly ConcurrentDictionary<string, (double LastGroundState, DateTime LastUpdate)> _sessionGroundStates = new();
     
+    // Track speed data for each session
+    private static readonly ConcurrentDictionary<string, (double LastGroundSpeed, double LastAirspeedTrue, double LastAirspeedIndicated, DateTime LastUpdate)> _sessionSpeedStates = new();
+    
     // Constants for session management
     private const int MAX_VARIABLES_PER_SESSION = 2000; // Limit variables to prevent memory issues
     private const int SESSION_IDLE_TIMEOUT_MINUTES = 60; // Clean up sessions idle for 60 minutes
@@ -149,6 +152,10 @@ public class DynamicVariableHub : Hub
     private const double GROUND_STATE_THRESHOLD = 0.1; // Threshold for considering ground state change
     private const int MIN_GROUND_STATE_UPDATE_MS = 500; // Minimum time between any ground state updates
     private const int MIN_GROUND_STATE_CHANGE_MS = 1000; // Minimum time between actual ground state changes
+
+    // Speed data constants
+    private const double SPEED_CHANGE_THRESHOLD = 0.5; // Threshold for considering speed change
+    private const int MIN_SPEED_UPDATE_MS = 100; // Minimum time between speed updates
 
     public DynamicVariableHub(ILogger<DynamicVariableHub> logger)
     {
@@ -229,6 +236,9 @@ public class DynamicVariableHub : Hub
                 // Get current ground state for this session
                 var groundState = _sessionGroundStates.GetOrAdd(sessionCode, (0.0, DateTime.UtcNow));
                 
+                // Get current speed state for this session
+                var speedState = _sessionSpeedStates.GetOrAdd(sessionCode, (0.0, 0.0, 0.0, DateTime.UtcNow));
+                
                 // Check if we should update the ground state
                 bool shouldUpdateGroundState = true;
                 
@@ -267,6 +277,34 @@ public class DynamicVariableHub : Hub
                     data.OnGround = groundState.LastGroundState;
                     _logger.LogDebug("Using previous ground state in session {SessionCode}: {GroundState}", 
                         sessionCode, data.OnGround);
+                }
+                
+                // Handle speed data updates
+                var timeSinceLastSpeedUpdate = DateTime.UtcNow - speedState.LastUpdate;
+                
+                // Only update speed data if enough time has passed
+                if (timeSinceLastSpeedUpdate.TotalMilliseconds >= MIN_SPEED_UPDATE_MS)
+                {
+                    // Update speed state
+                    _sessionSpeedStates[sessionCode] = (
+                        data.GroundSpeed,
+                        data.AirspeedTrue,
+                        data.AirspeedIndicated,
+                        DateTime.UtcNow
+                    );
+                    
+                    _logger.LogDebug("Updated speed data in session {SessionCode}: GS={GroundSpeed}, TAS={TrueAirspeed}, IAS={IndicatedAirspeed}", 
+                        sessionCode, data.GroundSpeed, data.AirspeedTrue, data.AirspeedIndicated);
+                }
+                else
+                {
+                    // Use previous speed data
+                    data.GroundSpeed = speedState.LastGroundSpeed;
+                    data.AirspeedTrue = speedState.LastAirspeedTrue;
+                    data.AirspeedIndicated = speedState.LastAirspeedIndicated;
+                    
+                    _logger.LogDebug("Using previous speed data in session {SessionCode}: GS={GroundSpeed}, TAS={TrueAirspeed}, IAS={IndicatedAirspeed}", 
+                        sessionCode, data.GroundSpeed, data.AirspeedTrue, data.AirspeedIndicated);
                 }
                 
                 // Set timestamp for data age tracking
@@ -555,6 +593,7 @@ public class DynamicVariableHub : Hub
                             _sessionVariableValues.TryRemove(sessionCode, out _);
                             _sessionLastActivity.TryRemove(sessionCode, out _);
                             _sessionGroundStates.TryRemove(sessionCode, out _); // Clean up ground state
+                            _sessionSpeedStates.TryRemove(sessionCode, out _); // Clean up speed state
                             _logger.LogInformation("Session {SessionCode} removed as all clients disconnected", sessionCode);
                         }
                     }
@@ -567,6 +606,7 @@ public class DynamicVariableHub : Hub
                         _sessionVariableValues.TryRemove(sessionCode, out _);
                         _sessionLastActivity.TryRemove(sessionCode, out _);
                         _sessionGroundStates.TryRemove(sessionCode, out _); // Clean up ground state
+                        _sessionSpeedStates.TryRemove(sessionCode, out _); // Clean up speed state
                     }
                 }
             }
