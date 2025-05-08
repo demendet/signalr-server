@@ -342,14 +342,14 @@ public class DynamicVariableHub : Hub
     /// </summary>
     private void SanitizeAircraftData(ref AircraftPositionData data)
     {
-        // Validate ground state - ensure it's either 0 or 1
+        // Validate ground state - ensure it's a valid double value
         if (double.IsNaN(data.OnGround) || double.IsInfinity(data.OnGround))
         {
             _logger.LogWarning("Received invalid ground state value: {GroundState}, sanitizing to 0", data.OnGround);
             data.OnGround = 0.0;
         }
         
-        // Normalize ground state to binary value
+        // Normalize ground state to binary value (0.0 or 1.0)
         data.OnGround = data.OnGround > 0.5 ? 1.0 : 0.0;
         
         // Validate speed data
