@@ -167,6 +167,12 @@ public class DynamicVariableHub : Hub
     private const int CONNECTION_STABILIZATION_MS = 2000; // Time to wait before considering a connection stable
     private const int CONTROL_TRANSFER_TIMEOUT_MS = 5000; // Time to wait for a control transfer to complete before timing out
 
+    // Add these new rate limiting fields to the class
+    private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, DateTime>> _clientRateLimits = new();
+    private const int GLOBAL_RATE_LIMIT_MS = 250; // Global minimum time between any messages from the same client
+    private const int CONNECTION_RATE_LIMIT_MS = 500; // Minimum time between connection change messages
+    private const int CONTROL_ACTION_RATE_LIMIT_MS = 3000; // Minimum time between control take/give actions
+
     public DynamicVariableHub(ILogger<DynamicVariableHub> logger)
     {
         _logger = logger;
@@ -182,6 +188,14 @@ public class DynamicVariableHub : Hub
             if (string.IsNullOrWhiteSpace(sessionCode))
             {
                 _logger.LogWarning("Client {ConnectionId} attempted to join with empty session code", Context.ConnectionId);
+                return;
+            }
+
+            // Check rate limiting
+            if (IsRateLimited(sessionCode, Context.ConnectionId, "connection"))
+            {
+                _logger.LogWarning("Rate limited connection attempt from {ConnectionId} to session {SessionCode}", 
+                    Context.ConnectionId, sessionCode);
                 return;
             }
 
@@ -398,9 +412,15 @@ public class DynamicVariableHub : Hub
         data.OnGround = data.OnGround > 0.5 ? 1.0 : 0.0;
         
         // Validate and sanitize speed data
-        SanitizeSpeedValue(ref data.GroundSpeed, "Ground Speed");
-        SanitizeSpeedValue(ref data.AirspeedTrue, "True Airspeed");
-        SanitizeSpeedValue(ref data.AirspeedIndicated, "Indicated Airspeed");
+        var groundSpeed = data.GroundSpeed;
+        SanitizeSpeedValue(ref groundSpeed, "Ground Speed");
+        data.GroundSpeed = groundSpeed;
+        var airspeedTrue = data.AirspeedTrue;
+        SanitizeSpeedValue(ref airspeedTrue, "True Airspeed");
+        data.AirspeedTrue = airspeedTrue;
+        var airspeedIndicated = data.AirspeedIndicated;
+        SanitizeSpeedValue(ref airspeedIndicated, "Indicated Airspeed");
+        data.AirspeedIndicated = airspeedIndicated;
         
         // Ensure speed values are consistent
         EnsureSpeedConsistency(ref data);
@@ -568,6 +588,14 @@ public class DynamicVariableHub : Hub
     {
         try
         {
+            // Check rate limiting
+            if (IsRateLimited(sessionCode, Context.ConnectionId, "control"))
+            {
+                _logger.LogWarning("Rate limited control transfer attempt from {ConnectionId} in session {SessionCode}", 
+                    Context.ConnectionId, sessionCode);
+                return;
+            }
+
             // Check if connection is stable
             if (!IsConnectionStable(Context.ConnectionId))
             {
@@ -792,6 +820,26 @@ public class DynamicVariableHub : Hub
                 {
                     connections.TryRemove(Context.ConnectionId, out _);
                     
+                    // Clean up rate limiting entries for this client
+                    if (_clientRateLimits.TryGetValue(sessionCode, out var rateLimits))
+                    {
+                        // Remove all rate limit entries for this connection
+                        var keysToRemove = rateLimits.Keys
+                            .Where(k => k.StartsWith($"{Context.ConnectionId}:"))
+                            .ToList();
+                            
+                        foreach (var key in keysToRemove)
+                        {
+                            rateLimits.TryRemove(key, out _);
+                        }
+                        
+                        // If no more rate limits in this session, remove the session entry
+                        if (rateLimits.IsEmpty)
+                        {
+                            _clientRateLimits.TryRemove(sessionCode, out _);
+                        }
+                    }
+                    
                     // Clear any pending control transfer locks by this client
                     if (_controlTransferLocks.TryGetValue(sessionCode, out var lockInfo) && 
                         lockInfo.PendingId == Context.ConnectionId)
@@ -935,5 +983,55 @@ public class DynamicVariableHub : Hub
         {
             Monitor.Exit(_cleanupLock);
         }
+    }
+
+    // Add a new method to check and update rate limits
+    private bool IsRateLimited(string sessionCode, string connectionId, string actionType)
+    {
+        var sessionLimits = _clientRateLimits.GetOrAdd(sessionCode, _ => new ConcurrentDictionary<string, DateTime>());
+        
+        string key = $"{connectionId}:{actionType}";
+        string globalKey = $"{connectionId}:global";
+        DateTime now = DateTime.UtcNow;
+        
+        // Check global rate limit for this client (applies to all actions)
+        if (sessionLimits.TryGetValue(globalKey, out DateTime lastGlobalAction))
+        {
+            TimeSpan elapsed = now - lastGlobalAction;
+            if (elapsed.TotalMilliseconds < GLOBAL_RATE_LIMIT_MS)
+            {
+                return true; // Rate limited
+            }
+        }
+        
+        // Update global timestamp for this client
+        sessionLimits[globalKey] = now;
+        
+        // Check specific action rate limit
+        if (sessionLimits.TryGetValue(key, out DateTime lastAction))
+        {
+            TimeSpan elapsed = now - lastAction;
+            int limitMs = GLOBAL_RATE_LIMIT_MS; // Default
+            
+            // Different rate limits for different action types
+            switch (actionType)
+            {
+                case "connection":
+                    limitMs = CONNECTION_RATE_LIMIT_MS;
+                    break;
+                case "control":
+                    limitMs = CONTROL_ACTION_RATE_LIMIT_MS;
+                    break;
+            }
+            
+            if (elapsed.TotalMilliseconds < limitMs)
+            {
+                return true; // Rate limited
+            }
+        }
+        
+        // Update the timestamp for this action
+        sessionLimits[key] = now;
+        return false; // Not rate limited
     }
 }
