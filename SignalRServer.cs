@@ -1,13 +1,15 @@
-using Microsoft.AspNetCore.Builder;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.AspNetCore.SignalR;
-using Microsoft.Extensions.Logging;
-using System.Threading.Tasks;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
-using System;
+using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -148,6 +150,9 @@ public class DynamicVariableHub : Hub
     // Track client connection stability
     private static readonly ConcurrentDictionary<string, (bool IsStable, DateTime ConnectTime)> _connectionStability = new();
     
+    // Keep track of who is the host (first client) for each session
+    private static readonly ConcurrentDictionary<string, string> _sessionHostMap = new();
+    
     // Constants for session management
     private const int MAX_VARIABLES_PER_SESSION = 2000; // Limit variables to prevent memory issues
     private const int SESSION_IDLE_TIMEOUT_MINUTES = 60; // Clean up sessions idle for 60 minutes
@@ -222,24 +227,99 @@ public class DynamicVariableHub : Hub
             // Wait for connection to stabilize before processing control
             await Task.Delay(500);
             
-            // Determine control status - first client gets control
+            // Determine if this is the host (first client) for this session
+            bool isHost = false;
+            
+            // If no host is set for this session yet, this client becomes the host
+            if (!_sessionHostMap.ContainsKey(sessionCode))
+            {
+                if (_sessionHostMap.TryAdd(sessionCode, Context.ConnectionId))
+                {
+                    isHost = true;
+                    _logger.LogInformation("Client {ConnectionId} is the host for session {SessionCode}", 
+                        Context.ConnectionId, sessionCode);
+                }
+            }
+            else
+            {
+                // Check if this client is the host
+                isHost = _sessionHostMap[sessionCode] == Context.ConnectionId;
+            }
+            
+            // Determine control status based on host status
             bool hasControl = false;
             
-            // Only attempt to claim control if there's no pending transfer
+            // Only attempt to update control if there's no pending transfer
             if (!_controlTransferLocks.ContainsKey(sessionCode))
             {
-                if (!_sessionControlMap.ContainsKey(sessionCode))
+                if (isHost)
                 {
-                    if (_sessionControlMap.TryAdd(sessionCode, Context.ConnectionId))
+                    // Host should always have control unless they explicitly gave it up
+                    if (!_sessionControlMap.ContainsKey(sessionCode))
                     {
+                        // No one has control yet, give it to the host
+                        if (_sessionControlMap.TryAdd(sessionCode, Context.ConnectionId))
+                        {
+                            hasControl = true;
+                            _logger.LogInformation("Host {ControlId} assigned initial control in session {SessionCode}", 
+                                Context.ConnectionId, sessionCode);
+                        }
+                    }
+                    else if (_sessionControlMap[sessionCode] != Context.ConnectionId)
+                    {
+                        // If host is reconnecting, they should get control back
+                        string previousController = _sessionControlMap[sessionCode];
+                        
+                        // Check if previous controller is still connected
+                        bool previousControllerConnected = sessionConnections.ContainsKey(previousController);
+                        
+                        if (!previousControllerConnected || 
+                            (previousControllerConnected && _connectionStability.TryGetValue(previousController, out var stability) && !stability.IsStable))
+                        {
+                            // Previous controller is gone or unstable, host takes back control
+                            _sessionControlMap[sessionCode] = Context.ConnectionId;
+                            hasControl = true;
+                            _logger.LogInformation("Host {ControlId} reclaimed control in session {SessionCode}", 
+                                Context.ConnectionId, sessionCode);
+                                
+                            // If previous controller is still here, notify them of lost control
+                            if (previousControllerConnected)
+                            {
+                                await Clients.Client(previousController).SendAsync("ControlStatusChanged", false);
+                            }
+                        }
+                        else
+                        {
+                            // Previous controller is still connected and stable
+                            // The host doesn't automatically take control back
+                            hasControl = false;
+                            _logger.LogInformation("Host {ControlId} joined but another client {CurrentController} has control in session {SessionCode}", 
+                                Context.ConnectionId, previousController, sessionCode);
+                        }
+                    }
+                    else
+                    {
+                        // Host already has control
                         hasControl = true;
-                        _logger.LogInformation("Initial control assigned to {ControlId} in session {SessionCode}", 
-                            Context.ConnectionId, sessionCode);
                     }
                 }
                 else
                 {
-                    hasControl = _sessionControlMap[sessionCode] == Context.ConnectionId;
+                    // Non-host clients don't get control automatically
+                    // They only have control if they already had it before (e.g., the host gave it to them)
+                    hasControl = _sessionControlMap.TryGetValue(sessionCode, out string controlId) && 
+                                 controlId == Context.ConnectionId;
+                                 
+                    if (hasControl)
+                    {
+                        _logger.LogInformation("Client {ClientId} rejoined with existing control status in session {SessionCode}", 
+                            Context.ConnectionId, sessionCode);
+                    }
+                    else
+                    {
+                        _logger.LogInformation("Client {ClientId} joined without control in session {SessionCode}", 
+                            Context.ConnectionId, sessionCode);
+                    }
                 }
             }
             else
@@ -307,92 +387,103 @@ public class DynamicVariableHub : Hub
                 // If we have a previous ground state
                 if (groundState.LastGroundState != 0)
                 {
-                    // Calculate time since last update
-                    var timeSinceLastUpdate = DateTime.UtcNow - groundState.LastUpdate;
+                    var timeSinceLastUpdate = (DateTime.UtcNow - groundState.LastUpdate).TotalMilliseconds;
                     
-                    // If less than minimum time has passed, don't update ground state
-                    if (timeSinceLastUpdate.TotalMilliseconds < MIN_GROUND_STATE_UPDATE_MS)
+                    // Limit ground state updates based on timing
+                    if (timeSinceLastUpdate < MIN_GROUND_STATE_UPDATE_MS)
                     {
                         shouldUpdateGroundState = false;
                     }
-                    
-                    // Normalize to binary values (0 or 1) to prevent odd values
-                    double normalizedNewGroundState = data.OnGround > 0.5 ? 1.0 : 0.0;
-                    double normalizedLastGroundState = groundState.LastGroundState > 0.5 ? 1.0 : 0.0;
-                    
-                    // If ground state changed significantly, require minimum time between changes
-                    if (normalizedNewGroundState != normalizedLastGroundState)
+                    // Also limit based on ground state change thresholds
+                    else if (Math.Abs(data.OnGround - groundState.LastGroundState) < GROUND_STATE_THRESHOLD)
                     {
-                        if (timeSinceLastUpdate.TotalMilliseconds < MIN_GROUND_STATE_CHANGE_MS)
-                        {
-                            shouldUpdateGroundState = false;
-                        }
+                        shouldUpdateGroundState = false;
+                    }
+                    // If this is an actual change in ground state, enforce a longer delay
+                    else if (Math.Abs(data.OnGround - groundState.LastGroundState) >= GROUND_STATE_THRESHOLD && 
+                            timeSinceLastUpdate < MIN_GROUND_STATE_CHANGE_MS)
+                    {
+                        shouldUpdateGroundState = false;
                     }
                 }
                 
-                // Update ground state if needed
+                // Update the ground state if needed
                 if (shouldUpdateGroundState)
                 {
-                    // Normalize to binary value
-                    double normalizedGroundState = data.OnGround > 0.5 ? 1.0 : 0.0;
-                    _sessionGroundStates[sessionCode] = (normalizedGroundState, DateTime.UtcNow);
-                    
-                    _logger.LogDebug("Updated ground state in session {SessionCode}: {GroundState}", 
-                        sessionCode, normalizedGroundState);
+                    _sessionGroundStates[sessionCode] = (data.OnGround, DateTime.UtcNow);
                 }
                 else
                 {
-                    // Use previous ground state
+                    // Use the existing ground state
                     data.OnGround = groundState.LastGroundState;
-                    _logger.LogDebug("Using previous ground state in session {SessionCode}: {GroundState}", 
-                        sessionCode, data.OnGround);
                 }
                 
-                // Handle speed data updates
-                var timeSinceLastSpeedUpdate = DateTime.UtcNow - speedState.LastUpdate;
-                
-                // Only update speed data if enough time has passed
-                if (timeSinceLastSpeedUpdate.TotalMilliseconds >= MIN_SPEED_UPDATE_MS)
+                // Similarly check and update speed state
+                var timeSinceLastSpeedUpdate = (DateTime.UtcNow - speedState.LastUpdate).TotalMilliseconds;
+                if (timeSinceLastSpeedUpdate >= MIN_SPEED_UPDATE_MS ||
+                    Math.Abs(data.GroundSpeed - speedState.LastGroundSpeed) >= SPEED_CHANGE_THRESHOLD ||
+                    Math.Abs(data.AirspeedTrue - speedState.LastAirspeedTrue) >= SPEED_CHANGE_THRESHOLD ||
+                    Math.Abs(data.AirspeedIndicated - speedState.LastAirspeedIndicated) >= SPEED_CHANGE_THRESHOLD)
                 {
-                    // Update speed state
-                    _sessionSpeedStates[sessionCode] = (
-                        data.GroundSpeed,
-                        data.AirspeedTrue,
-                        data.AirspeedIndicated,
-                        DateTime.UtcNow
-                    );
-                    
-                    _logger.LogDebug("Updated speed data in session {SessionCode}: GS={GroundSpeed}, TAS={TrueAirspeed}, IAS={IndicatedAirspeed}", 
-                        sessionCode, data.GroundSpeed, data.AirspeedTrue, data.AirspeedIndicated);
+                    // Update the speed state
+                    _sessionSpeedStates[sessionCode] = (data.GroundSpeed, data.AirspeedTrue, data.AirspeedIndicated, DateTime.UtcNow);
                 }
                 else
                 {
-                    // Use previous speed data
+                    // Use existing speed values
                     data.GroundSpeed = speedState.LastGroundSpeed;
                     data.AirspeedTrue = speedState.LastAirspeedTrue;
                     data.AirspeedIndicated = speedState.LastAirspeedIndicated;
-                    
-                    _logger.LogDebug("Using previous speed data in session {SessionCode}: GS={GroundSpeed}, TAS={TrueAirspeed}, IAS={IndicatedAirspeed}", 
-                        sessionCode, data.GroundSpeed, data.AirspeedTrue, data.AirspeedIndicated);
                 }
-                
-                // Set timestamp for data age tracking
-                data.TimeStamp = DateTime.UtcNow;
                 
                 // Update session activity timestamp
                 _sessionLastActivity[sessionCode] = DateTime.UtcNow;
                 
-                // Log only at debug level to avoid log flooding
-                _logger.LogDebug("Received position data in session {SessionCode}: Alt={Alt:F1}, Gs={Gs:F1}, OnGround={OnGround}", 
-                    sessionCode, data.Altitude, data.GroundSpeed, data.OnGround);
+                try 
+                {
+                    // Use JsonSerializerOptions to handle infinity values
+                    var jsonOptions = new System.Text.Json.JsonSerializerOptions
+                    {
+                        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
+                    };
                     
-                // Send to others in the session
-                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftPosition", data);
+                    // Send to all others in the group
+                    await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftPosition", data, jsonOptions);
+                }
+                catch (System.Text.Json.JsonException ex)
+                {
+                    _logger.LogError(ex, "Error serializing aircraft position data");
+                    
+                    // Additional cleanup in case of JSON serialization error - check for invalid values
+                    if (double.IsInfinity(data.GroundSpeed) || double.IsNaN(data.GroundSpeed)) data.GroundSpeed = 0;
+                    if (double.IsInfinity(data.AirspeedTrue) || double.IsNaN(data.AirspeedTrue)) data.AirspeedTrue = 0;
+                    if (double.IsInfinity(data.AirspeedIndicated) || double.IsNaN(data.AirspeedIndicated)) data.AirspeedIndicated = 0;
+                    
+                    // Try again with sanitized data
+                    try
+                    {
+                        var jsonOptions = new System.Text.Json.JsonSerializerOptions
+                        {
+                            NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
+                        };
+                        
+                        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftPosition", data, jsonOptions);
+                    }
+                    catch (Exception retryEx)
+                    {
+                        _logger.LogError(retryEx, "Failed to send aircraft position data even after sanitizing values");
+                    }
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Client {ClientId} tried to send position data without control in session {SessionCode}", 
+                    Context.ConnectionId, sessionCode);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing aircraft position data in session {SessionCode}", sessionCode);
+            _logger.LogError(ex, "Error sending aircraft position for session {SessionCode}", sessionCode);
         }
     }
     
@@ -401,29 +492,30 @@ public class DynamicVariableHub : Hub
     /// </summary>
     private void SanitizeAircraftData(ref AircraftPositionData data)
     {
-        // Validate ground state - ensure it's a valid double value
-        if (double.IsNaN(data.OnGround) || double.IsInfinity(data.OnGround))
-        {
-            _logger.LogWarning("Received invalid ground state value: {GroundState}, sanitizing to 0", data.OnGround);
-            data.OnGround = 0.0;
-        }
-        
-        // Normalize ground state to binary value (0.0 or 1.0)
+        // Ensure onGround is either 0 or 1
         data.OnGround = data.OnGround > 0.5 ? 1.0 : 0.0;
         
-        // Validate and sanitize speed data
-        var groundSpeed = data.GroundSpeed;
+        // Validate and sanitize speed data - use temporary variables
+        double groundSpeed = data.GroundSpeed;
+        double airspeedTrue = data.AirspeedTrue;
+        double airspeedIndicated = data.AirspeedIndicated;
+        
         SanitizeSpeedValue(ref groundSpeed, "Ground Speed");
-        data.GroundSpeed = groundSpeed;
-        var airspeedTrue = data.AirspeedTrue;
         SanitizeSpeedValue(ref airspeedTrue, "True Airspeed");
-        data.AirspeedTrue = airspeedTrue;
-        var airspeedIndicated = data.AirspeedIndicated;
         SanitizeSpeedValue(ref airspeedIndicated, "Indicated Airspeed");
+        
+        // Assign back to the properties
+        data.GroundSpeed = groundSpeed;
+        data.AirspeedTrue = airspeedTrue;
         data.AirspeedIndicated = airspeedIndicated;
         
-        // Ensure speed values are consistent
-        EnsureSpeedConsistency(ref data);
+        // Ensure speed values are consistent by using temp variables
+        EnsureSpeedConsistencyImpl(ref groundSpeed, ref airspeedTrue, ref airspeedIndicated, data.OnGround);
+        
+        // Copy back to data object
+        data.GroundSpeed = groundSpeed;
+        data.AirspeedTrue = airspeedTrue;
+        data.AirspeedIndicated = airspeedIndicated;
         
         // Log speed values for debugging
         _logger.LogDebug("Sanitized speeds - GS: {GroundSpeed:F1}, TAS: {TrueAirspeed:F1}, IAS: {IndicatedAirspeed:F1}",
@@ -453,35 +545,50 @@ public class DynamicVariableHub : Hub
         }
     }
     
-    private void EnsureSpeedConsistency(ref AircraftPositionData data)
+    // Add a new implementation that works with ref variables directly
+    private void EnsureSpeedConsistencyImpl(ref double groundSpeed, ref double airspeedTrue, ref double airspeedIndicated, double onGround)
     {
         // If we're on the ground, ground speed should be close to true airspeed
-        if (data.OnGround > 0.5)
+        if (onGround > 0.5)
         {
             // If ground speed is very low but TAS is high, something's wrong
-            if (data.GroundSpeed < 1.0 && data.AirspeedTrue > 10.0)
+            if (groundSpeed < 1.0 && airspeedTrue > 10.0)
             {
                 _logger.LogWarning("Inconsistent speeds on ground - GS: {GroundSpeed}, TAS: {TrueAirspeed}, adjusting",
-                    data.GroundSpeed, data.AirspeedTrue);
-                data.AirspeedTrue = data.GroundSpeed;
+                    groundSpeed, airspeedTrue);
+                airspeedTrue = groundSpeed;
             }
         }
         
         // True airspeed should never be less than indicated airspeed
-        if (data.AirspeedTrue < data.AirspeedIndicated)
+        if (airspeedTrue < airspeedIndicated)
         {
             _logger.LogWarning("True airspeed ({TrueAirspeed}) less than indicated airspeed ({IndicatedAirspeed}), adjusting",
-                data.AirspeedTrue, data.AirspeedIndicated);
-            data.AirspeedTrue = data.AirspeedIndicated;
+                airspeedTrue, airspeedIndicated);
+            airspeedTrue = airspeedIndicated;
         }
         
         // Ground speed should never be significantly higher than true airspeed
-        if (data.GroundSpeed > data.AirspeedTrue * 1.5)
+        if (groundSpeed > airspeedTrue * 1.5)
         {
             _logger.LogWarning("Ground speed ({GroundSpeed}) significantly higher than true airspeed ({TrueAirspeed}), adjusting",
-                data.GroundSpeed, data.AirspeedTrue);
-            data.GroundSpeed = data.AirspeedTrue;
+                groundSpeed, airspeedTrue);
+            groundSpeed = airspeedTrue;
         }
+    }
+    
+    // Keep original method for backwards compatibility
+    private void EnsureSpeedConsistency(ref AircraftPositionData data)
+    {
+        double groundSpeed = data.GroundSpeed;
+        double airspeedTrue = data.AirspeedTrue;
+        double airspeedIndicated = data.AirspeedIndicated;
+        
+        EnsureSpeedConsistencyImpl(ref groundSpeed, ref airspeedTrue, ref airspeedIndicated, data.OnGround);
+        
+        data.GroundSpeed = groundSpeed;
+        data.AirspeedTrue = airspeedTrue;
+        data.AirspeedIndicated = airspeedIndicated;
     }
     
     /// <summary>
@@ -645,6 +752,10 @@ public class DynamicVariableHub : Hub
             // Create a lock for this transfer
             _controlTransferLocks[sessionCode] = (Context.ConnectionId, DateTime.UtcNow);
             
+            // Check if this client is the host for this session
+            bool isHost = _sessionHostMap.TryGetValue(sessionCode, out string hostId) && 
+                           hostId == Context.ConnectionId;
+            
             try
             {
                 if (giving)
@@ -661,7 +772,11 @@ public class DynamicVariableHub : Hub
                                 
                             if (otherConnections.Any())
                             {
-                                var newController = otherConnections.First();
+                                // If the host is in the list of other connections, prioritize giving control to them
+                                var newController = isHost ? 
+                                    otherConnections.First() : 
+                                    (otherConnections.Contains(hostId) ? hostId : otherConnections.First());
+                                
                                 // Atomically update the control map
                                 if (_sessionControlMap.TryUpdate(sessionCode, newController, currentController))
                                 {
@@ -680,45 +795,79 @@ public class DynamicVariableHub : Hub
                     if (currentController != Context.ConnectionId)
                     {
                         string oldController = currentController;
-                        // Atomically update the control map
-                        if (string.IsNullOrEmpty(currentController))
+                        
+                        // If the host is taking control, they get priority
+                        bool allowTakeControl = isHost || string.IsNullOrEmpty(currentController);
+                        
+                        if (!isHost && !string.IsNullOrEmpty(currentController))
                         {
-                            // No current controller - add a new entry
-                            if (_sessionControlMap.TryAdd(sessionCode, Context.ConnectionId))
+                            // Non-host can only take control from a non-host or an inactive controller
+                            bool currentControllerIsHost = currentController == hostId;
+                            bool controllerIsActive = _sessionConnections.TryGetValue(sessionCode, out var connections) && 
+                                                    connections.ContainsKey(oldController) &&
+                                                    IsConnectionStable(oldController);
+                                                    
+                            allowTakeControl = !currentControllerIsHost || !controllerIsActive;
+                        }
+                        
+                        if (allowTakeControl)
+                        {
+                            // Atomically update the control map
+                            if (string.IsNullOrEmpty(currentController))
                             {
-                                await Clients.Caller.SendAsync("ControlStatusChanged", true);
-                                _logger.LogInformation("Control taken by {NewId} in session {SessionCode} (no previous controller)", 
-                                    Context.ConnectionId, sessionCode);
+                                // No current controller - add a new entry
+                                if (_sessionControlMap.TryAdd(sessionCode, Context.ConnectionId))
+                                {
+                                    await Clients.Caller.SendAsync("ControlStatusChanged", true);
+                                    _logger.LogInformation("Control taken by {NewId} in session {SessionCode} (no previous controller)", 
+                                        Context.ConnectionId, sessionCode);
+                                }
+                            }
+                            else
+                            {
+                                // Check if the current controller is still connected and stable
+                                bool controllerIsActive = _sessionConnections.TryGetValue(sessionCode, out var connections) && 
+                                                       connections.ContainsKey(oldController) &&
+                                                       IsConnectionStable(oldController);
+                                                       
+                                if (!controllerIsActive)
+                                {
+                                    // Previous controller is gone or unstable, force the change
+                                    _sessionControlMap[sessionCode] = Context.ConnectionId;
+                                    await Clients.Caller.SendAsync("ControlStatusChanged", true);
+                                    _logger.LogInformation("Control forcibly taken by {NewId} from inactive controller {OldId} in session {SessionCode}", 
+                                        Context.ConnectionId, oldController, sessionCode);
+                                }
+                                else
+                                {
+                                    // Replace existing controller
+                                    if (_sessionControlMap.TryUpdate(sessionCode, Context.ConnectionId, currentController))
+                                    {
+                                        await Clients.Caller.SendAsync("ControlStatusChanged", true);
+                                        if (!string.IsNullOrEmpty(oldController))
+                                        {
+                                            await Clients.Client(oldController).SendAsync("ControlStatusChanged", false);
+                                        }
+                                        
+                                        string takeType = isHost ? " (host reclaiming control)" : "";
+                                        _logger.LogInformation("Control taken by {NewId} from {OldId} in session {SessionCode}{TakeType}", 
+                                            Context.ConnectionId, oldController, sessionCode, takeType);
+                                    }
+                                }
                             }
                         }
                         else
                         {
-                            // Check if the current controller is still connected and stable
-                            bool controllerIsActive = _sessionConnections.TryGetValue(sessionCode, out var connections) && 
-                                                   connections.ContainsKey(oldController) &&
-                                                   IsConnectionStable(oldController);
-                                                   
-                            if (!controllerIsActive)
+                            // Client cannot take control
+                            if (isHost)
                             {
-                                // Previous controller is gone or unstable, force the change
-                                _sessionControlMap[sessionCode] = Context.ConnectionId;
-                                await Clients.Caller.SendAsync("ControlStatusChanged", true);
-                                _logger.LogInformation("Control forcibly taken by {NewId} from inactive controller {OldId} in session {SessionCode}", 
-                                    Context.ConnectionId, oldController, sessionCode);
+                                _logger.LogWarning("Host {HostId} cannot take control in session {SessionCode} due to special handling", 
+                                    Context.ConnectionId, sessionCode);
                             }
                             else
                             {
-                                // Replace existing controller
-                                if (_sessionControlMap.TryUpdate(sessionCode, Context.ConnectionId, currentController))
-                                {
-                                    await Clients.Caller.SendAsync("ControlStatusChanged", true);
-                                    if (!string.IsNullOrEmpty(oldController))
-                                    {
-                                        await Clients.Client(oldController).SendAsync("ControlStatusChanged", false);
-                                    }
-                                    _logger.LogInformation("Control taken by {NewId} from {OldId} in session {SessionCode}", 
-                                        Context.ConnectionId, oldController, sessionCode);
-                                }
+                                _logger.LogWarning("Client {ClientId} cannot take control from host {HostId} in session {SessionCode}", 
+                                    Context.ConnectionId, oldController, sessionCode);
                             }
                         }
                     }
@@ -815,6 +964,10 @@ public class DynamicVariableHub : Hub
                 // Update session activity timestamp
                 _sessionLastActivity[sessionCode] = DateTime.UtcNow;
                 
+                // Check if this client is the host for this session
+                bool isHost = _sessionHostMap.TryGetValue(sessionCode, out string hostId) && 
+                              hostId == Context.ConnectionId;
+                
                 // Remove the connection from session
                 if (_sessionConnections.TryGetValue(sessionCode, out var connections))
                 {
@@ -853,74 +1006,112 @@ public class DynamicVariableHub : Hub
                     {
                         if (connections.Count > 0)
                         {
-                            // Find a new controller - take the first stable connection
-                            var stableConnections = connections.Keys
-                                .Where(IsConnectionStable)
-                                .ToList();
-                                
-                            if (stableConnections.Any())
+                            // If the host disconnected but there are other clients, temporarily transfer control
+                            // Only do this if this client is NOT the host, or if we're explicitly told to
+                            // This ensures the host can get control back when they reconnect
+                            if (!isHost)
                             {
-                                var newController = stableConnections.First();
-                                
-                                // Wait a moment before transferring control to prevent race conditions
-                                await Task.Delay(500);
-                                
-                                // Atomically update the controller if it hasn't changed
-                                if (_sessionControlMap.TryGetValue(sessionCode, out var currentControlId) && 
-                                    currentControlId == Context.ConnectionId)
+                                // Find a new temporary controller - take the first stable connection
+                                var stableConnections = connections.Keys
+                                    .Where(IsConnectionStable)
+                                    .ToList();
+                                    
+                                if (stableConnections.Any())
                                 {
-                                    if (_sessionControlMap.TryUpdate(sessionCode, newController, Context.ConnectionId))
+                                    var newController = stableConnections.First();
+                                    
+                                    // Wait a moment before transferring control to prevent race conditions
+                                    await Task.Delay(500);
+                                    
+                                    // Atomically update the controller if it hasn't changed
+                                    if (_sessionControlMap.TryGetValue(sessionCode, out var currentControlId) && 
+                                        currentControlId == Context.ConnectionId)
                                     {
-                                        await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
-                                        _logger.LogInformation("Control automatically transferred to {NewId} in session {SessionCode} after disconnect", 
-                                            newController, sessionCode);
+                                        if (_sessionControlMap.TryUpdate(sessionCode, newController, Context.ConnectionId))
+                                        {
+                                            await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                                            _logger.LogInformation("Control temporarily transferred to {NewId} in session {SessionCode} after non-host disconnect", 
+                                                newController, sessionCode);
+                                        }
+                                    }
+                                }
+                                else if (connections.Count > 0) 
+                                {
+                                    // No stable connections yet, but there are connections
+                                    // Wait a bit and try again with any connection
+                                    await Task.Delay(1000);
+                                    
+                                    if (connections.Count > 0 && 
+                                        _sessionControlMap.TryGetValue(sessionCode, out var currentControlId) && 
+                                        currentControlId == Context.ConnectionId)
+                                    {
+                                        var newController = connections.Keys.First();
+                                        if (_sessionControlMap.TryUpdate(sessionCode, newController, Context.ConnectionId))
+                                        {
+                                            await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                                            _logger.LogInformation("Control temporarily transferred to {NewId} in session {SessionCode} after non-host disconnect (no stable connections)", 
+                                                newController, sessionCode);
+                                        }
                                     }
                                 }
                             }
-                            else if (connections.Count > 0) 
+                            else
                             {
-                                // No stable connections yet, but there are connections
-                                // Wait a bit and try again with any connection
-                                await Task.Delay(1000);
-                                
-                                if (connections.Count > 0 && 
-                                    _sessionControlMap.TryGetValue(sessionCode, out var currentControlId) && 
-                                    currentControlId == Context.ConnectionId)
-                                {
-                                    var newController = connections.Keys.First();
-                                    if (_sessionControlMap.TryUpdate(sessionCode, newController, Context.ConnectionId))
-                                    {
-                                        await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
-                                        _logger.LogInformation("Control automatically transferred to {NewId} in session {SessionCode} after disconnect (no stable connections)", 
-                                            newController, sessionCode);
-                                    }
-                                }
+                                // This is the host disconnecting - we'll keep track of control for when they reconnect
+                                _logger.LogInformation("Host {HostId} disconnected from session {SessionCode}, control status preserved for reconnection",
+                                    Context.ConnectionId, sessionCode);
                             }
                         }
                         else
                         {
-                            // No other connections - remove session data
+                            // No other connections - don't remove session data yet if this was the host
+                            // This allows the host to reconnect to the same session
+                            
+                            // Do remove controller info though, as the host will reclaim it on reconnect
                             _sessionControlMap.TryRemove(sessionCode, out _);
-                            _sessionConnections.TryRemove(sessionCode, out _);
-                            _sessionVariableValues.TryRemove(sessionCode, out _);
-                            _sessionLastActivity.TryRemove(sessionCode, out _);
-                            _sessionGroundStates.TryRemove(sessionCode, out _); 
-                            _sessionSpeedStates.TryRemove(sessionCode, out _); 
-                            _controlTransferLocks.TryRemove(sessionCode, out _);
-                            _logger.LogInformation("Session {SessionCode} removed as all clients disconnected", sessionCode);
+                            
+                            _logger.LogInformation("Last client (host: {IsHost}) disconnected from session {SessionCode}, preserving session", 
+                                isHost, sessionCode);
+                            
+                            // Start a cleanup timer that will remove the session after a longer timeout
+                            // if no one reconnects
+                            Task.Delay(TimeSpan.FromMinutes(10)).ContinueWith(_ => 
+                            {
+                                if (_sessionConnections.TryGetValue(sessionCode, out var connCheck) && 
+                                    connCheck.Count == 0)
+                                {
+                                    // If still no connections after the timeout, clean up all session data
+                                    ConcurrentDictionary<string, DateTime> connections;
+                                    string controlId;
+                                    ConcurrentDictionary<string, VariableChangeDto> variables;
+                                    DateTime lastActivity;
+                                    (double LastGroundState, DateTime LastUpdate) groundState;
+                                    (double LastGroundSpeed, double LastAirspeedTrue, double LastAirspeedIndicated, DateTime LastUpdate) speedState;
+                                    (string PendingId, DateTime LockTime) transferLock;
+                                    string hostId;
+                                    
+                                    _sessionConnections.TryRemove(sessionCode, out connections);
+                                    _sessionControlMap.TryRemove(sessionCode, out controlId);
+                                    _sessionVariableValues.TryRemove(sessionCode, out variables);
+                                    _sessionLastActivity.TryRemove(sessionCode, out lastActivity);
+                                    _sessionGroundStates.TryRemove(sessionCode, out groundState); 
+                                    _sessionSpeedStates.TryRemove(sessionCode, out speedState); 
+                                    _controlTransferLocks.TryRemove(sessionCode, out transferLock);
+                                    // Only remove host info if no one reconnected at all
+                                    _sessionHostMap.TryRemove(sessionCode, out hostId);
+                                    
+                                    _logger.LogInformation("Session {SessionCode} removed after 10-minute empty timeout", 
+                                        sessionCode);
+                                }
+                            });
                         }
                     }
                     
                     // If no more connections, clean up the session
                     if (connections.Count == 0)
                     {
-                        _sessionConnections.TryRemove(sessionCode, out _);
-                        _sessionControlMap.TryRemove(sessionCode, out _);
-                        _sessionVariableValues.TryRemove(sessionCode, out _);
-                        _sessionLastActivity.TryRemove(sessionCode, out _);
-                        _sessionGroundStates.TryRemove(sessionCode, out _); 
-                        _sessionSpeedStates.TryRemove(sessionCode, out _); 
-                        _controlTransferLocks.TryRemove(sessionCode, out _);
+                        _logger.LogInformation("All clients disconnected from session {SessionCode}, waiting for possible reconnection", 
+                            sessionCode);
                     }
                 }
             }
