@@ -352,30 +352,77 @@ public class DynamicVariableHub : Hub
         // Normalize ground state to binary value (0.0 or 1.0)
         data.OnGround = data.OnGround > 0.5 ? 1.0 : 0.0;
         
-        // Validate speed data
-        if (double.IsNaN(data.GroundSpeed) || double.IsInfinity(data.GroundSpeed) || data.GroundSpeed < 0)
+        // Validate and sanitize speed data
+        var groundSpeed = data.GroundSpeed;
+        SanitizeSpeedValue(ref groundSpeed, "Ground Speed");
+        data.GroundSpeed = groundSpeed;
+        var airspeedTrue = data.AirspeedTrue;
+        SanitizeSpeedValue(ref airspeedTrue, "True Airspeed");
+        data.AirspeedTrue = airspeedTrue;
+        var airspeedIndicated = data.AirspeedIndicated;
+        SanitizeSpeedValue(ref airspeedIndicated, "Indicated Airspeed");
+        data.AirspeedIndicated = airspeedIndicated;
+        
+        // Ensure speed values are consistent
+        EnsureSpeedConsistency(ref data);
+        
+        // Log speed values for debugging
+        _logger.LogDebug("Sanitized speeds - GS: {GroundSpeed:F1}, TAS: {TrueAirspeed:F1}, IAS: {IndicatedAirspeed:F1}",
+            data.GroundSpeed, data.AirspeedTrue, data.AirspeedIndicated);
+    }
+    
+    private void SanitizeSpeedValue(ref double speed, string speedName)
+    {
+        // Handle invalid values
+        if (double.IsNaN(speed) || double.IsInfinity(speed))
         {
-            _logger.LogWarning("Received invalid ground speed value: {GroundSpeed}, sanitizing", data.GroundSpeed);
-            data.GroundSpeed = 0.0;
+            _logger.LogWarning("Received invalid {SpeedName} value: {Speed}, sanitizing to 0", speedName, speed);
+            speed = 0.0;
+            return;
         }
         
-        if (double.IsNaN(data.AirspeedTrue) || double.IsInfinity(data.AirspeedTrue) || data.AirspeedTrue < 0)
-        {
-            _logger.LogWarning("Received invalid true airspeed value: {AirspeedTrue}, sanitizing", data.AirspeedTrue);
-            data.AirspeedTrue = 0.0;
-        }
+        // Ensure positive value
+        speed = Math.Abs(speed);
         
-        if (double.IsNaN(data.AirspeedIndicated) || double.IsInfinity(data.AirspeedIndicated) || data.AirspeedIndicated < 0)
-        {
-            _logger.LogWarning("Received invalid indicated airspeed value: {AirspeedIndicated}, sanitizing", data.AirspeedIndicated);
-            data.AirspeedIndicated = 0.0;
-        }
-        
-        // Cap speed values to reasonable limits
+        // Cap at reasonable limit
         const double MAX_SPEED = 2000.0; // Max reasonable speed in knots
-        data.GroundSpeed = Math.Min(data.GroundSpeed, MAX_SPEED);
-        data.AirspeedTrue = Math.Min(data.AirspeedTrue, MAX_SPEED);
-        data.AirspeedIndicated = Math.Min(data.AirspeedIndicated, MAX_SPEED);
+        if (speed > MAX_SPEED)
+        {
+            _logger.LogWarning("{SpeedName} value {Speed} exceeds maximum, capping at {MaxSpeed}", 
+                speedName, speed, MAX_SPEED);
+            speed = MAX_SPEED;
+        }
+    }
+    
+    private void EnsureSpeedConsistency(ref AircraftPositionData data)
+    {
+        // If we're on the ground, ground speed should be close to true airspeed
+        if (data.OnGround > 0.5)
+        {
+            // If ground speed is very low but TAS is high, something's wrong
+            if (data.GroundSpeed < 1.0 && data.AirspeedTrue > 10.0)
+            {
+                _logger.LogWarning("Inconsistent speeds on ground - GS: {GroundSpeed}, TAS: {TrueAirspeed}, adjusting",
+                    data.GroundSpeed, data.AirspeedTrue);
+                data.AirspeedTrue = data.GroundSpeed;
+            }
+        }
+        
+        // True airspeed should never be less than indicated airspeed
+        if (data.AirspeedTrue < data.AirspeedIndicated)
+        {
+            _logger.LogWarning("True airspeed ({TrueAirspeed}) less than indicated airspeed ({IndicatedAirspeed}), adjusting",
+                data.AirspeedTrue, data.AirspeedIndicated);
+            data.AirspeedTrue = data.AirspeedIndicated;
+        }
+        
+        // Ground speed should never be significantly higher than true airspeed
+        if (data.GroundSpeed > data.AirspeedTrue * 1.5)
+        {
+            _logger.LogWarning("Ground speed ({GroundSpeed}) significantly higher than true airspeed ({TrueAirspeed}), adjusting",
+                data.GroundSpeed, data.AirspeedTrue);
+            data.GroundSpeed = data.AirspeedTrue;
+        }
     }
     
     /// <summary>
