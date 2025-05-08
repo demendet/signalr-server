@@ -233,6 +233,9 @@ public class DynamicVariableHub : Hub
             if (_sessionControlMap.TryGetValue(sessionCode, out string controlId) && 
                 controlId == Context.ConnectionId)
             {
+                // Validate and sanitize the data before processing
+                SanitizeAircraftData(ref data);
+                
                 // Get current ground state for this session
                 var groundState = _sessionGroundStates.GetOrAdd(sessionCode, (0.0, DateTime.UtcNow));
                 
@@ -254,8 +257,12 @@ public class DynamicVariableHub : Hub
                         shouldUpdateGroundState = false;
                     }
                     
+                    // Normalize to binary values (0 or 1) to prevent odd values
+                    double normalizedNewGroundState = data.OnGround > 0.5 ? 1.0 : 0.0;
+                    double normalizedLastGroundState = groundState.LastGroundState > 0.5 ? 1.0 : 0.0;
+                    
                     // If ground state changed significantly, require minimum time between changes
-                    if (Math.Abs(data.OnGround - groundState.LastGroundState) > GROUND_STATE_THRESHOLD)
+                    if (normalizedNewGroundState != normalizedLastGroundState)
                     {
                         if (timeSinceLastUpdate.TotalMilliseconds < MIN_GROUND_STATE_CHANGE_MS)
                         {
@@ -267,9 +274,12 @@ public class DynamicVariableHub : Hub
                 // Update ground state if needed
                 if (shouldUpdateGroundState)
                 {
-                    _sessionGroundStates[sessionCode] = (data.OnGround, DateTime.UtcNow);
+                    // Normalize to binary value
+                    double normalizedGroundState = data.OnGround > 0.5 ? 1.0 : 0.0;
+                    _sessionGroundStates[sessionCode] = (normalizedGroundState, DateTime.UtcNow);
+                    
                     _logger.LogDebug("Updated ground state in session {SessionCode}: {GroundState}", 
-                        sessionCode, data.OnGround);
+                        sessionCode, normalizedGroundState);
                 }
                 else
                 {
@@ -325,6 +335,47 @@ public class DynamicVariableHub : Hub
         {
             _logger.LogError(ex, "Error processing aircraft position data in session {SessionCode}", sessionCode);
         }
+    }
+    
+    /// <summary>
+    /// Validate and sanitize aircraft data to prevent invalid values
+    /// </summary>
+    private void SanitizeAircraftData(ref AircraftPositionData data)
+    {
+        // Validate ground state
+        if (double.IsNaN(data.OnGround) || double.IsInfinity(data.OnGround) || Math.Abs(data.OnGround) > 1.0)
+        {
+            _logger.LogWarning("Received invalid ground state value: {GroundState}, sanitizing", data.OnGround);
+            data.OnGround = 0.0;
+        }
+        
+        // Normalize ground state to binary value
+        data.OnGround = data.OnGround > 0.5 ? 1.0 : 0.0;
+        
+        // Validate speed data
+        if (double.IsNaN(data.GroundSpeed) || double.IsInfinity(data.GroundSpeed) || data.GroundSpeed < 0)
+        {
+            _logger.LogWarning("Received invalid ground speed value: {GroundSpeed}, sanitizing", data.GroundSpeed);
+            data.GroundSpeed = 0.0;
+        }
+        
+        if (double.IsNaN(data.AirspeedTrue) || double.IsInfinity(data.AirspeedTrue) || data.AirspeedTrue < 0)
+        {
+            _logger.LogWarning("Received invalid true airspeed value: {AirspeedTrue}, sanitizing", data.AirspeedTrue);
+            data.AirspeedTrue = 0.0;
+        }
+        
+        if (double.IsNaN(data.AirspeedIndicated) || double.IsInfinity(data.AirspeedIndicated) || data.AirspeedIndicated < 0)
+        {
+            _logger.LogWarning("Received invalid indicated airspeed value: {AirspeedIndicated}, sanitizing", data.AirspeedIndicated);
+            data.AirspeedIndicated = 0.0;
+        }
+        
+        // Cap speed values to reasonable limits
+        const double MAX_SPEED = 2000.0; // Max reasonable speed in knots
+        data.GroundSpeed = Math.Min(data.GroundSpeed, MAX_SPEED);
+        data.AirspeedTrue = Math.Min(data.AirspeedTrue, MAX_SPEED);
+        data.AirspeedIndicated = Math.Min(data.AirspeedIndicated, MAX_SPEED);
     }
     
     /// <summary>
