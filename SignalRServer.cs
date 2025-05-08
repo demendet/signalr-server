@@ -136,11 +136,19 @@ public class DynamicVariableHub : Hub
     // Track last activity timestamp for sessions
     private static readonly ConcurrentDictionary<string, DateTime> _sessionLastActivity = new();
     
+    // Track ground state for each session
+    private static readonly ConcurrentDictionary<string, (double LastGroundState, DateTime LastUpdate)> _sessionGroundStates = new();
+    
     // Constants for session management
     private const int MAX_VARIABLES_PER_SESSION = 2000; // Limit variables to prevent memory issues
     private const int SESSION_IDLE_TIMEOUT_MINUTES = 60; // Clean up sessions idle for 60 minutes
     private static readonly object _cleanupLock = new object();
     private static DateTime _lastCleanupTime = DateTime.UtcNow;
+
+    // Ground state constants
+    private const double GROUND_STATE_THRESHOLD = 0.1; // Threshold for considering ground state change
+    private const int MIN_GROUND_STATE_UPDATE_MS = 500; // Minimum time between any ground state updates
+    private const int MIN_GROUND_STATE_CHANGE_MS = 1000; // Minimum time between actual ground state changes
 
     public DynamicVariableHub(ILogger<DynamicVariableHub> logger)
     {
@@ -218,6 +226,49 @@ public class DynamicVariableHub : Hub
             if (_sessionControlMap.TryGetValue(sessionCode, out string controlId) && 
                 controlId == Context.ConnectionId)
             {
+                // Get current ground state for this session
+                var groundState = _sessionGroundStates.GetOrAdd(sessionCode, (0.0, DateTime.UtcNow));
+                
+                // Check if we should update the ground state
+                bool shouldUpdateGroundState = true;
+                
+                // If we have a previous ground state
+                if (groundState.LastGroundState != 0)
+                {
+                    // Calculate time since last update
+                    var timeSinceLastUpdate = DateTime.UtcNow - groundState.LastUpdate;
+                    
+                    // If less than minimum time has passed, don't update ground state
+                    if (timeSinceLastUpdate.TotalMilliseconds < MIN_GROUND_STATE_UPDATE_MS)
+                    {
+                        shouldUpdateGroundState = false;
+                    }
+                    
+                    // If ground state changed significantly, require minimum time between changes
+                    if (Math.Abs(data.OnGround - groundState.LastGroundState) > GROUND_STATE_THRESHOLD)
+                    {
+                        if (timeSinceLastUpdate.TotalMilliseconds < MIN_GROUND_STATE_CHANGE_MS)
+                        {
+                            shouldUpdateGroundState = false;
+                        }
+                    }
+                }
+                
+                // Update ground state if needed
+                if (shouldUpdateGroundState)
+                {
+                    _sessionGroundStates[sessionCode] = (data.OnGround, DateTime.UtcNow);
+                    _logger.LogDebug("Updated ground state in session {SessionCode}: {GroundState}", 
+                        sessionCode, data.OnGround);
+                }
+                else
+                {
+                    // Use previous ground state
+                    data.OnGround = groundState.LastGroundState;
+                    _logger.LogDebug("Using previous ground state in session {SessionCode}: {GroundState}", 
+                        sessionCode, data.OnGround);
+                }
+                
                 // Set timestamp for data age tracking
                 data.TimeStamp = DateTime.UtcNow;
                 
@@ -503,6 +554,7 @@ public class DynamicVariableHub : Hub
                             _sessionConnections.TryRemove(sessionCode, out _);
                             _sessionVariableValues.TryRemove(sessionCode, out _);
                             _sessionLastActivity.TryRemove(sessionCode, out _);
+                            _sessionGroundStates.TryRemove(sessionCode, out _); // Clean up ground state
                             _logger.LogInformation("Session {SessionCode} removed as all clients disconnected", sessionCode);
                         }
                     }
@@ -514,6 +566,7 @@ public class DynamicVariableHub : Hub
                         _sessionControlMap.TryRemove(sessionCode, out _);
                         _sessionVariableValues.TryRemove(sessionCode, out _);
                         _sessionLastActivity.TryRemove(sessionCode, out _);
+                        _sessionGroundStates.TryRemove(sessionCode, out _); // Clean up ground state
                     }
                 }
             }
