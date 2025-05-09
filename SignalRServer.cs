@@ -17,11 +17,12 @@ builder.Logging.SetMinimumLevel(LogLevel.Information);
 // Add SignalR services with increased buffer size and keep-alive settings
 builder.Services.AddSignalR(options =>
 {
-    options.MaximumReceiveMessageSize = 262144; // 256KB - increased for better performance
-    options.StreamBufferCapacity = 30; // Increased buffer capacity
-    options.KeepAliveInterval = TimeSpan.FromSeconds(10); // More frequent pings
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30); // Give clients more time before timeout
-    options.HandshakeTimeout = TimeSpan.FromSeconds(15); // More time for initial handshake
+    options.MaximumReceiveMessageSize = 1048576; // 1MB - increased for better performance
+    options.StreamBufferCapacity = 64; // Increased buffer capacity for more stable connections
+    options.KeepAliveInterval = TimeSpan.FromSeconds(5); // More frequent pings to detect disconnects faster
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); // Longer timeout to handle temporary network issues
+    options.HandshakeTimeout = TimeSpan.FromSeconds(30); // More time for initial handshake
+    options.EnableDetailedErrors = true; // Enable detailed errors for easier debugging
 });
 
 // Add CORS to allow client connections with more flexible settings
@@ -144,69 +145,110 @@ public class DynamicVariableHub : Hub
         _logger = logger;
     }
     
-    public async Task JoinSession(string sessionCode)
+ public async Task JoinSession(string sessionCode)
+{
+    try
     {
-        try
+        _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", Context.ConnectionId, sessionCode);
+        await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
+
+        bool isFirstClient = false;
+
+        lock (_lockObj)
         {
-            _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", Context.ConnectionId, sessionCode);
-            await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
-            
-            lock (_lockObj)
+            if (!_sessionConnections.ContainsKey(sessionCode))
             {
-                if (!_sessionConnections.ContainsKey(sessionCode))
-                {
-                    _sessionConnections[sessionCode] = new List<string>();
-                    _sessionVariableValues[sessionCode] = new Dictionary<string, VariableChangeDto>();
-                    _clientHealthStatus[sessionCode] = new Dictionary<string, ClientHealthStatus>();
-                }
-                
-                if (!_sessionConnections[sessionCode].Contains(Context.ConnectionId))
-                {
-                    _sessionConnections[sessionCode].Add(Context.ConnectionId);
-                }
-                
-                // Track this client's health status
-                _clientHealthStatus[sessionCode][Context.ConnectionId] = new ClientHealthStatus
-                {
-                    LastHeartbeat = DateTime.UtcNow,
-                    ConnectionQuality = ConnectionQuality.Good
-                };
+                _sessionConnections[sessionCode] = new List<string>();
+                _sessionVariableValues[sessionCode] = new Dictionary<string, VariableChangeDto>();
+                _clientHealthStatus[sessionCode] = new Dictionary<string, ClientHealthStatus>();
+                isFirstClient = true;
             }
-            
-            bool hasControl = false;
-            
-            lock (_lockObj)
+
+            if (!_sessionConnections[sessionCode].Contains(Context.ConnectionId))
             {
-                if (!_sessionControlMap.ContainsKey(sessionCode))
+                // Add new client to the session connections list
+                _sessionConnections[sessionCode].Add(Context.ConnectionId);
+            }
+
+            // Track this client's health status
+            _clientHealthStatus[sessionCode][Context.ConnectionId] = new ClientHealthStatus
+            {
+                LastHeartbeat = DateTime.UtcNow,
+                ConnectionQuality = ConnectionQuality.Good
+            };
+        }
+
+        bool hasControl = false;
+        string previousController = null;
+        bool shouldNotifyPreviousController = false;
+        
+        lock (_lockObj)
+        {
+            // If this is the first client (host), or no controller exists yet
+            if (isFirstClient || !_sessionControlMap.ContainsKey(sessionCode))
+            {
+                _sessionControlMap[sessionCode] = Context.ConnectionId;
+                hasControl = true;
+                _logger.LogInformation("Control assigned to {ControlId} in session {SessionCode} (isHost: {IsHost})",
+                    Context.ConnectionId, sessionCode, isFirstClient);
+            }
+            else
+            {
+                // If this is not the first client, check if they already had control (reconnecting case)
+                hasControl = _sessionControlMap[sessionCode] == Context.ConnectionId;
+
+                // Special case: If the joining client is reconnecting as host, give them control
+                bool isHost = _sessionConnections[sessionCode].FirstOrDefault() == Context.ConnectionId;
+                if (isHost && !hasControl)
                 {
+                    // Host is reconnecting, transfer control back to them
+                    previousController = _sessionControlMap[sessionCode];
                     _sessionControlMap[sessionCode] = Context.ConnectionId;
                     hasControl = true;
-                    _logger.LogInformation("Initial control assigned to {ControlId} in session {SessionCode}", Context.ConnectionId, sessionCode);
+                    shouldNotifyPreviousController = true;
+
+                    _logger.LogInformation("Host {HostId} reconnected - control transferred from {PreviousId}",
+                        Context.ConnectionId, previousController);
+
+                    // We'll notify the previous controller later, outside the lock
                 }
-                else
-                {
-                    hasControl = _sessionControlMap[sessionCode] == Context.ConnectionId;
-                }
-            }
-            
-            await Clients.Caller.SendAsync("ControlStatusChanged", hasControl);
-            _logger.LogInformation("Notified joining client {ClientId} of control status ({HasControl}) in session {SessionCode}", Context.ConnectionId, hasControl, sessionCode);
-            
-            // Send the current state of all variables to the new client
-            if (_sessionVariableValues.TryGetValue(sessionCode, out var variables) && variables.Count > 0)
-            {
-                foreach (var variable in variables.Values)
-                {
-                    await Clients.Caller.SendAsync("ReceiveVariableChange", variable);
-                }
-                _logger.LogInformation("Sent {Count} cached variables to client {ClientId}", variables.Count, Context.ConnectionId);
             }
         }
-        catch (Exception ex)
+        
+        // We've moved these async calls outside the lock
+        if (shouldNotifyPreviousController && !string.IsNullOrEmpty(previousController))
         {
-            _logger.LogError(ex, "Error in JoinSession for {ConnectionId}", Context.ConnectionId);
+            await Clients.Client(previousController).SendAsync("ControlStatusChanged", false);
+            await Clients.Groups(sessionCode).SendAsync("ControlTransferred", Context.ConnectionId, "host");
         }
+
+        // Notify this client of their control status
+        await Clients.Caller.SendAsync("ControlStatusChanged", hasControl);
+        _logger.LogInformation("Notified client {ClientId} of control status ({HasControl}) in session {SessionCode}",
+            Context.ConnectionId, hasControl, sessionCode);
+
+        // Send the current state of all variables to the new client
+        if (_sessionVariableValues.TryGetValue(sessionCode, out var variables) && variables.Count > 0)
+        {
+            foreach (var variable in variables.Values)
+            {
+                await Clients.Caller.SendAsync("ReceiveVariableChange", variable);
+            }
+            _logger.LogInformation("Sent {Count} cached variables to client {ClientId}", variables.Count, Context.ConnectionId);
+        }
+
+        // Tell everyone who the current controller is
+        string currentController = _sessionControlMap.TryGetValue(sessionCode, out var controller) ? controller : "";
+        bool controllerIsHost = _sessionConnections[sessionCode].FirstOrDefault() == currentController;
+
+        await Clients.Group(sessionCode).SendAsync("ControlInfo",
+            currentController, controllerIsHost ? "host" : "client");
     }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Error in JoinSession for {ConnectionId}", Context.ConnectionId);
+    }
+}
     
     public async Task SendVariableChange(string sessionCode, VariableChangeDto variable)
     {
@@ -293,39 +335,94 @@ public class DynamicVariableHub : Hub
         try
         {
             string currentController = null;
-            
+
             // Get the current controller
             lock (_lockObj)
             {
                 _sessionControlMap.TryGetValue(sessionCode, out currentController);
             }
-            
+
+            // Check if this is a "host" client based on being the first client in the session
+            // or having a specific host identifier
+            bool isHostClient = false;
+            string mostLikelyHost = null;
+
+            lock (_lockObj)
+            {
+                if (_sessionConnections.TryGetValue(sessionCode, out var connections) && connections.Count > 0)
+                {
+                    // First connection in the list is considered the host
+                    mostLikelyHost = connections.FirstOrDefault();
+                    isHostClient = Context.ConnectionId == mostLikelyHost;
+                }
+            }
+
             // For taking control (giving=false)
             if (!giving)
             {
-                // Check if someone else has control and we want to take it
-                if (currentController != Context.ConnectionId)
+                // Priority logic for control requests:
+                // 1. Host client always gets control if requested
+                // 2. Other clients can take control if no controller exists
+                // 3. Other clients can take control from non-host controller
+                // 4. Other clients cannot take control from host controller
+
+                bool shouldGetControl = false;
+
+                if (isHostClient)
+                {
+                    // Host always gets control when requested
+                    shouldGetControl = true;
+                    _logger.LogInformation("Host client {HostId} requested control - priority granted", Context.ConnectionId);
+                }
+                else if (string.IsNullOrEmpty(currentController))
+                {
+                    // No controller exists, allow taking control
+                    shouldGetControl = true;
+                }
+                else if (currentController != mostLikelyHost)
+                {
+                    // Current controller is not the host, allow transfer
+                    shouldGetControl = true;
+                }
+                else
+                {
+                    // Current controller is the host, don't allow taking control
+                    _logger.LogInformation("Request from {ClientId} denied - host {HostId} has control",
+                        Context.ConnectionId, mostLikelyHost);
+                    shouldGetControl = false;
+
+                    // Confirm current control status
+                    await Clients.Caller.SendAsync("ControlStatusChanged", false);
+                    return;
+                }
+
+                if (shouldGetControl && currentController != Context.ConnectionId)
                 {
                     string oldController = currentController;
-                    
+
                     // Save the new controller in our map
                     lock (_lockObj)
                     {
                         _sessionControlMap[sessionCode] = Context.ConnectionId;
                     }
-                    
+
                     // Notify the requester they now have control
                     await Clients.Caller.SendAsync("ControlStatusChanged", true);
-                    _logger.LogInformation("Control transferred to {NewController} from {OldController}", 
+
+                    // Notify all clients about the control change for UI updates
+                    await Clients.Groups(sessionCode).SendAsync("ControlTransferred", Context.ConnectionId,
+                        isHostClient ? "host" : "client");
+
+                    _logger.LogInformation("Control transferred to {NewController} from {OldController}",
                         Context.ConnectionId, oldController);
-                    
+
                     // Notify the previous controller they lost control (if they exist)
                     if (!string.IsNullOrEmpty(oldController))
                     {
                         await Clients.Client(oldController).SendAsync("ControlStatusChanged", false);
                     }
                 }
-                else
+                else if (currentController == Context.ConnectionId)
                 {
                     // Already has control, just confirm
                     await Clients.Caller.SendAsync("ControlStatusChanged", true);
@@ -337,51 +434,73 @@ public class DynamicVariableHub : Hub
                 // Check if this client currently has control
                 if (currentController == Context.ConnectionId)
                 {
-                    // Remove controller mapping
-                    lock (_lockObj)
-                    {
-                        _sessionControlMap.Remove(sessionCode);
-                    }
-                    
-                    // Notify this client they no longer have control
-                    await Clients.Caller.SendAsync("ControlStatusChanged", false);
-                    _logger.LogInformation("Control released by {Controller} in session {SessionCode}", 
-                        Context.ConnectionId, sessionCode);
-                    
                     // Find another client to give control to (if any)
                     string newController = null;
-                    
+                    bool newControllerIsHost = false;
+
                     lock (_lockObj)
                     {
-                        if (_sessionConnections.TryGetValue(sessionCode, out var connections) && 
-                            connections.Count > 0 && 
-                            connections.Contains(Context.ConnectionId))
+                        if (_sessionConnections.TryGetValue(sessionCode, out var connections) &&
+                            connections.Count > 0)
                         {
-                            // Find clients with good connection quality first
-                            var healthyClients = 
-                                from conn in connections
-                                where conn != Context.ConnectionId && 
-                                      _clientHealthStatus[sessionCode].ContainsKey(conn) &&
-                                      _clientHealthStatus[sessionCode][conn].ConnectionQuality >= ConnectionQuality.Good
-                                select conn;
-                                
-                            // Choose first healthy client or any client if none are healthy
-                            newController = healthyClients.FirstOrDefault() ?? 
-                                connections.FirstOrDefault(c => c != Context.ConnectionId);
-                                
+                            // Prioritize giving control back to host if available
+                            if (connections.Contains(mostLikelyHost) && mostLikelyHost != Context.ConnectionId)
+                            {
+                                newController = mostLikelyHost;
+                                newControllerIsHost = true;
+                                _logger.LogInformation("Returning control to host {HostId}", newController);
+                            }
+                            else
+                            {
+                                // Find clients with good connection quality first
+                                var healthyClients =
+                                    from conn in connections
+                                    where conn != Context.ConnectionId &&
+                                          _clientHealthStatus[sessionCode].ContainsKey(conn) &&
+                                          _clientHealthStatus[sessionCode][conn].ConnectionQuality >= ConnectionQuality.Good
+                                    select conn;
+
+                                // Choose first healthy client or any client if none are healthy
+                                newController = healthyClients.FirstOrDefault() ??
+                                    connections.FirstOrDefault(c => c != Context.ConnectionId);
+                            }
+
                             if (!string.IsNullOrEmpty(newController))
                             {
                                 // Give control to the new controller
                                 _sessionControlMap[sessionCode] = newController;
                             }
+                            else
+                            {
+                                // If no other clients to give control to
+                                _sessionControlMap.Remove(sessionCode);
+                            }
+                        }
+                        else
+                        {
+                            // No connections left
+                            _sessionControlMap.Remove(sessionCode);
                         }
                     }
-                    
-                    // Notify the new controller they have control (if any)
+
+                    // Notify this client they no longer have control
+                    await Clients.Caller.SendAsync("ControlStatusChanged", false);
+                    _logger.LogInformation("Control released by {Controller} in session {SessionCode}",
+                        Context.ConnectionId, sessionCode);
+
+                    // Notify all clients about the control change
                     if (!string.IsNullOrEmpty(newController))
                     {
+                        await Clients.Groups(sessionCode).SendAsync("ControlTransferred", newController,
+                            newControllerIsHost ? "host" : "client");
+
+                        // Notify the new controller they have control
                         await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
                         _logger.LogInformation("Control automatically transferred to {NewController}", newController);
+                    }
+                    else
+                    {
+                        await Clients.Groups(sessionCode).SendAsync("ControlTransferred", "", "none");
                     }
                 }
                 else
