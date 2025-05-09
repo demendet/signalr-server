@@ -1,170 +1,260 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
-using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure Kestrel to use port 3000 for Railway's internal routing
-builder.WebHost.UseUrls("http://+:3000");
+// Add console logging
+builder.Logging.AddConsole();
 
-// Add CORS support
-builder.Services.AddCors(options =>
-{
-    options.AddDefaultPolicy(policy =>
-    {
-        policy.SetIsOriginAllowed(_ => true)
-              .AllowAnyMethod()
-              .AllowAnyHeader()
-              .AllowCredentials();
-    });
+// Add SignalR services with increased buffer size for smoother data flow
+builder.Services.AddSignalR(options => {
+    options.MaximumReceiveMessageSize = 102400; // 100KB
+    options.StreamBufferCapacity = 20; // Increase buffer capacity
 });
-
-// Add SignalR
-builder.Services.AddSignalR(options =>
-{
-    options.MaximumReceiveMessageSize = 102400; // 100KB for large messages
-    options.EnableDetailedErrors = true;
-});
-
-// Add logging
-builder.Services.AddLogging();
 
 var app = builder.Build();
 
-// Configure middleware - order is important
-app.UseCors();
-
-// Add WebSockets support
-app.UseWebSockets(new WebSocketOptions
-{
-    KeepAliveInterval = TimeSpan.FromMinutes(2)
-});
-
-// Map routes
-app.MapGet("/", () => "G1000 Signaling Server Running");
-app.MapHub<G1000SignalingHub>("/sharedcockpithub");
+// Use top-level route registration for the hub
+app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// SignalR Hub for WebRTC signaling
-public class G1000SignalingHub : Hub
+// Enhanced AircraftData class with physics properties and lights
+public class AircraftData
 {
-    private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _rooms = new();
-    private static readonly ConcurrentDictionary<string, string> _userRooms = new();
-    private readonly ILogger<G1000SignalingHub> _logger;
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public double Altitude { get; set; }
+    public double Pitch { get; set; }
+    public double Bank { get; set; }
+    public double Heading { get; set; }
+    public double Throttle { get; set; }
+    public double Aileron { get; set; }
+    public double Elevator { get; set; }
+    public double Rudder { get; set; }
+    public double BrakeLeft { get; set; }
+    public double BrakeRight { get; set; }
+    public double ParkingBrake { get; set; }
+    public double Mixture { get; set; }
+    public int Flaps { get; set; }
+    public int Gear { get; set; }
+    // Physics properties
+    public double GroundSpeed { get; set; }
+    public double VerticalSpeed { get; set; }
+    public double AirspeedTrue { get; set; }
+    public double AirspeedIndicated { get; set; }
+    public double OnGround { get; set; }
+    public double VelocityBodyX { get; set; }
+    public double VelocityBodyY { get; set; }
+    public double VelocityBodyZ { get; set; }
+    public double ElevatorTrimPosition { get; set; }
+    
+    // Aircraft lights
+    public double LightBeacon { get; set; }
+    public double LightLanding { get; set; }
+    public double LightTaxi { get; set; }
+    public double LightNav { get; set; }
+    public double LightStrobe { get; set; }
+    
+    // Pitot heat
+    public double PitotHeat { get; set; }
+}
 
-    public G1000SignalingHub(ILogger<G1000SignalingHub> logger)
+// DTO for light states
+public class LightStatesDto
+{
+    public bool LightBeacon { get; set; }
+    public bool LightLanding { get; set; }
+    public bool LightTaxi { get; set; }
+    public bool LightNav { get; set; }
+    public bool LightStrobe { get; set; }
+}
+
+// DTO for pitot heat state
+public class PitotHeatStateDto
+{
+    public bool PitotHeatOn { get; set; }
+}
+
+// DTO for G1000 softkey press
+public class G1000SoftkeyPressDto
+{
+    public int SoftkeyNumber { get; set; }
+}
+
+// The SignalR hub
+public class CockpitHub : Hub
+{
+    private readonly ILogger<CockpitHub> _logger;
+    private static readonly Dictionary<string, string> _sessionControlMap = new();
+    private static readonly Dictionary<string, List<string>> _sessionConnections = new();
+
+    public CockpitHub(ILogger<CockpitHub> logger)
     {
         _logger = logger;
     }
 
-    // Join or create a room
-    public async Task JoinRoom(string roomId)
+    public async Task JoinSession(string sessionCode)
     {
-        // Get or create the room
-        var room = _rooms.GetOrAdd(roomId, _ => new ConcurrentDictionary<string, string>());
-
-        // Add the user to the room
-        string connectionId = Context.ConnectionId;
-        room[connectionId] = connectionId;
-        _userRooms[connectionId] = roomId;
-
-        // Join the SignalR group for this room
-        await Groups.AddToGroupAsync(connectionId, roomId);
-
-        _logger.LogInformation("User {ConnectionId} joined room {RoomId}", connectionId, roomId);
-
-        // Notify other participants
-        await Clients.OthersInGroup(roomId).SendAsync("UserJoined", connectionId);
-
-        // Return information about other users in the room
-        await Clients.Caller.SendAsync("RoomJoined", roomId, room.Keys.Where(id => id != connectionId).ToList());
-    }
-
-    // Send a WebRTC offer to a specific peer
-    public async Task SendOffer(string targetConnectionId, string offer)
-    {
-        string senderConnectionId = Context.ConnectionId;
-        _logger.LogInformation("User {ConnectionId} sent offer to {TargetConnectionId}", senderConnectionId, targetConnectionId);
+        _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", Context.ConnectionId, sessionCode);
+        await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
         
-        await Clients.Client(targetConnectionId).SendAsync("ReceiveOffer", senderConnectionId, offer);
-    }
-
-    // Send a WebRTC answer to a specific peer
-    public async Task SendAnswer(string targetConnectionId, string answer)
-    {
-        string senderConnectionId = Context.ConnectionId;
-        _logger.LogInformation("User {ConnectionId} sent answer to {TargetConnectionId}", senderConnectionId, targetConnectionId);
+        // Track connections in the session
+        if (!_sessionConnections.ContainsKey(sessionCode))
+        {
+            _sessionConnections[sessionCode] = new List<string>();
+        }
+        _sessionConnections[sessionCode].Add(Context.ConnectionId);
         
-        await Clients.Client(targetConnectionId).SendAsync("ReceiveAnswer", senderConnectionId, answer);
+        // By default, the first connection (host) has control
+        if (!_sessionControlMap.ContainsKey(sessionCode))
+        {
+            _sessionControlMap[sessionCode] = Context.ConnectionId;
+            // Inform the client they have control (host always starts with control)
+            await Clients.Caller.SendAsync("ControlStatusChanged", true);
+            _logger.LogInformation("Initial control assigned to {ControlId} in session {SessionCode}", 
+                Context.ConnectionId, sessionCode);
+        }
+        else
+        {
+            // Inform joining client about current control status
+            bool hasControl = _sessionControlMap[sessionCode] == Context.ConnectionId;
+            await Clients.Caller.SendAsync("ControlStatusChanged", hasControl);
+            _logger.LogInformation("Notified joining client {ClientId} of control status ({HasControl}) in session {SessionCode}", 
+                Context.ConnectionId, hasControl, sessionCode);
+        }
     }
-
-    // Send ICE candidate information to a specific peer
-    public async Task SendIceCandidate(string targetConnectionId, string iceCandidate)
+    
+    public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
-        string senderConnectionId = Context.ConnectionId;
-        _logger.LogInformation("User {ConnectionId} sent ICE candidate to {TargetConnectionId}", senderConnectionId, targetConnectionId);
-        
-        await Clients.Client(targetConnectionId).SendAsync("ReceiveIceCandidate", senderConnectionId, iceCandidate);
+        // Verify this client has control before broadcasting data
+        if (_sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId)
+        {
+            // Only log essential info to avoid console spam
+            _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
+                sessionCode, data.Altitude, data.GroundSpeed);
+                
+            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+        }
     }
-
-    // Send G1000 control messages - softkey press
-    public async Task SendG1000SoftkeyPress(string roomId, int keyNumber, bool isPfd)
+    
+    public async Task SendLightStates(string sessionCode, LightStatesDto lights)
     {
-        _logger.LogInformation("User {ConnectionId} pressed {Type} softkey {Key} in room {RoomId}", 
-            Context.ConnectionId, isPfd ? "PFD" : "MFD", keyNumber, roomId);
+        _logger.LogInformation("Received light states from client in session {SessionCode}: B={Beacon}, L={Landing}, T={Taxi}, N={Nav}, S={Strobe}", 
+            sessionCode, lights.LightBeacon, lights.LightLanding, lights.LightTaxi, lights.LightNav, lights.LightStrobe);
         
-        await Clients.OthersInGroup(roomId).SendAsync("ReceiveG1000SoftkeyPress", keyNumber, isPfd);
+        // Send to all other clients in the session
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightStates", lights);
     }
-
-    // Send generic G1000 control messages
-    public async Task SendG1000Control(string roomId, string controlData)
+    
+    public async Task SendPitotHeatState(string sessionCode, PitotHeatStateDto state)
     {
-        _logger.LogInformation("User {ConnectionId} sent control data {ControlData} in room {RoomId}", 
-            Context.ConnectionId, controlData, roomId);
+        _logger.LogInformation("Received pitot heat state from client in session {SessionCode}: PitotHeat={PitotHeat}", 
+            sessionCode, state.PitotHeatOn);
         
-        await Clients.OthersInGroup(roomId).SendAsync("ReceiveG1000Control", controlData);
+        // Send to all other clients in the session
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceivePitotHeatState", state);
     }
-
-    // Handle G1000 knob rotation
-    public async Task SendG1000KnobRotation(string roomId, string knobName, int steps)
+    
+    public async Task SendG1000SoftkeyPress(string sessionCode, G1000SoftkeyPressDto press)
     {
-        _logger.LogInformation("User {ConnectionId} rotated knob {KnobName} by {Steps} steps in room {RoomId}", 
-            Context.ConnectionId, knobName, steps, roomId);
+        _logger.LogInformation("Received G1000 softkey press from client in session {SessionCode}: SoftkeyNumber={Number}", 
+            sessionCode, press.SoftkeyNumber);
         
-        await Clients.OthersInGroup(roomId).SendAsync("ReceiveG1000KnobRotation", knobName, steps);
+        // Send to all other clients in the session
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveG1000SoftkeyPress", press);
     }
-
-    // Handle disconnect
+    
+    public async Task TransferControl(string sessionCode, bool giving)
+    {
+        string currentController = _sessionControlMap.GetValueOrDefault(sessionCode, "");
+        
+        if (giving) // Host is giving control
+        {
+            if (currentController == Context.ConnectionId)
+            {
+                // Find other clients in this session
+                var otherConnections = _sessionConnections[sessionCode]
+                    .Where(id => id != Context.ConnectionId)
+                    .ToList();
+                    
+                if (otherConnections.Any())
+                {
+                    var newController = otherConnections.First();
+                    _sessionControlMap[sessionCode] = newController;
+                    
+                    // Notify both parties
+                    await Clients.Caller.SendAsync("ControlStatusChanged", false);
+                    await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                    
+                    _logger.LogInformation("Control transferred from {OldId} to {NewId} in session {SessionCode}", 
+                        Context.ConnectionId, newController, sessionCode);
+                }
+            }
+        }
+        else // Client is taking control
+        {
+            if (currentController != Context.ConnectionId)
+            {
+                var oldController = currentController;
+                _sessionControlMap[sessionCode] = Context.ConnectionId;
+                
+                // Notify both parties
+                await Clients.Caller.SendAsync("ControlStatusChanged", true);
+                if (!string.IsNullOrEmpty(oldController))
+                    await Clients.Client(oldController).SendAsync("ControlStatusChanged", false);
+                
+                _logger.LogInformation("Control taken by {NewId} from {OldId} in session {SessionCode}", 
+                    Context.ConnectionId, oldController, sessionCode);
+            }
+        }
+    }
+    
     public override async Task OnDisconnectedAsync(Exception exception)
     {
-        string connectionId = Context.ConnectionId;
-        
-        // Check if user was in a room
-        if (_userRooms.TryRemove(connectionId, out string roomId))
+        // Find any sessions this client is part of
+        var sessions = _sessionConnections
+            .Where(kvp => kvp.Value.Contains(Context.ConnectionId))
+            .Select(kvp => kvp.Key)
+            .ToList();
+            
+        foreach (var session in sessions)
         {
-            // Remove user from room
-            if (_rooms.TryGetValue(roomId, out var room))
+            // Remove client from the session
+            _sessionConnections[session].Remove(Context.ConnectionId);
+            
+            // If this was the controlling client, reassign control
+            if (_sessionControlMap.GetValueOrDefault(session) == Context.ConnectionId)
             {
-                room.TryRemove(connectionId, out _);
-                
-                // If room is empty, remove it
-                if (room.IsEmpty)
+                if (_sessionConnections[session].Any())
                 {
-                    _rooms.TryRemove(roomId, out _);
-                    _logger.LogInformation("Room {RoomId} removed as it's now empty", roomId);
+                    var newController = _sessionConnections[session].First();
+                    _sessionControlMap[session] = newController;
+                    await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                    _logger.LogInformation("Control automatically transferred to {NewId} after disconnect in session {SessionCode}", 
+                        newController, session);
                 }
                 else
                 {
-                    // Notify other users that this user has left
-                    await Clients.OthersInGroup(roomId).SendAsync("UserLeft", connectionId);
-                    _logger.LogInformation("User {ConnectionId} left room {RoomId}", connectionId, roomId);
+                    // If no other connections, remove the session
+                    _sessionControlMap.Remove(session);
+                    _sessionConnections.Remove(session);
+                    _logger.LogInformation("Session {SessionCode} removed as all clients disconnected", session);
                 }
             }
             
-            // Remove user from SignalR group
-            await Groups.RemoveFromGroupAsync(connectionId, roomId);
+            // If session is empty, clean up
+            if (!_sessionConnections[session].Any())
+            {
+                _sessionConnections.Remove(session);
+                _sessionControlMap.Remove(session);
+            }
         }
         
         await base.OnDisconnectedAsync(exception);
     }
-}
