@@ -1,3 +1,0 @@
-﻿<Project>
-  <Import Project="..\build\G1000SignalingServer.props" />
-</Project>
