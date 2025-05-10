@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Http.Connections;
 using System;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -12,37 +13,59 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add console logging
 builder.Logging.AddConsole();
-builder.Logging.SetMinimumLevel(LogLevel.Information);
+builder.Logging.SetMinimumLevel(LogLevel.Debug); // Set to Debug for more detailed logs
 
-// Add SignalR services with optimized settings
+// Add SignalR services with optimized settings for stability
 builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 1048576; // 1MB
     options.StreamBufferCapacity = 64;
-    options.KeepAliveInterval = TimeSpan.FromSeconds(5);
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
-    options.HandshakeTimeout = TimeSpan.FromSeconds(30);
-    options.EnableDetailedErrors = true;
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15); // Increased for better stability
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30); // Reduced timeout to fail faster if connection issues
+    options.HandshakeTimeout = TimeSpan.FromSeconds(15); // Reduced handshake timeout
+    options.EnableDetailedErrors = true; // Enable detailed errors during development
+})
+.AddJsonProtocol(options => // Configure JSON serialization
+{
+    options.PayloadSerializerOptions.PropertyNamingPolicy = null; // Match .NET property names
+    options.PayloadSerializerOptions.PropertyNameCaseInsensitive = true;
 });
 
-// Add CORS to allow client connections
+// Add CORS with broader settings to ensure client connection
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("CorsPolicy",
-        builder => builder
+    options.AddDefaultPolicy(builder =>
+    {
+        builder
+            .SetIsOriginAllowed(_ => true) // Allow any origin
             .AllowAnyMethod()
             .AllowAnyHeader()
-            .AllowCredentials()
-            .SetIsOriginAllowed(_ => true));
+            .AllowCredentials();
+    });
 });
 
 var app = builder.Build();
 
-// Enable CORS
-app.UseCors("CorsPolicy");
+// Enable request logging for troubleshooting
+app.Use(async (context, next) =>
+{
+    var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+    logger.LogInformation("Request {Method} {Path}", context.Request.Method, context.Request.Path);
+    await next.Invoke();
+});
 
-// Map the hub
-app.MapHub<RailwayHub>("/railwayhub");
+// Enable CORS
+app.UseCors();
+
+// Map the hub with specific transport options
+app.MapHub<RailwayHub>("/cockpithub", options => // Use the same endpoint name as in the original code
+{
+    options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
+    options.WebSockets.CloseTimeout = TimeSpan.FromSeconds(10);
+    options.LongPolling.PollTimeout = TimeSpan.FromSeconds(90);
+    options.TransportMaxBufferSize = 1024 * 1024; // 1MB
+    options.ApplicationMaxBufferSize = 1024 * 1024; // 1MB
+});
 
 app.Run();
 
@@ -70,6 +93,19 @@ public class NetworkElementData
     public string ElementType { get; set; } // Signal, Switch, Crossing, etc.
     public string State { get; set; }
     public Dictionary<string, string> Properties { get; set; } = new Dictionary<string, string>();
+}
+
+// Variable change for general purpose data synchronization
+public class VariableChangeDto
+{
+    public string VariableName { get; set; }
+    public string VariableType { get; set; }
+    public string AccessMethod { get; set; }
+    public string Value { get; set; }
+    public Dictionary<string, string> Properties { get; set; } = new Dictionary<string, string>();
+    public bool IsBroadcast { get; set; } = false;
+    public string SourceClientId { get; set; }
+    public long Timestamp { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }
 
 // Client connection information
@@ -106,6 +142,7 @@ public class RailwayHub : Hub
     // Data caching for late-joining clients
     private static readonly Dictionary<string, Dictionary<string, TrainData>> _sessionTrains = new();
     private static readonly Dictionary<string, Dictionary<string, NetworkElementData>> _sessionNetworkElements = new();
+    private static readonly Dictionary<string, Dictionary<string, VariableChangeDto>> _sessionVariableValues = new();
     
     // Connection health tracking
     private static readonly Dictionary<string, Dictionary<string, ConnectionQuality>> _connectionQualities = new();
@@ -117,8 +154,14 @@ public class RailwayHub : Hub
     {
         _logger = logger;
     }
+
+    public override async Task OnConnectedAsync()
+    {
+        _logger.LogInformation("Client connected: {ConnectionId}", Context.ConnectionId);
+        await base.OnConnectedAsync();
+    }
     
-    public async Task JoinSession(string sessionId, string clientName, string role)
+    public async Task JoinSession(string sessionId, string clientName = "Unknown", string role = "Observer")
     {
         try
         {
@@ -138,6 +181,7 @@ public class RailwayHub : Hub
                     _sessionTrains[sessionId] = new Dictionary<string, TrainData>();
                     _sessionNetworkElements[sessionId] = new Dictionary<string, NetworkElementData>();
                     _connectionQualities[sessionId] = new Dictionary<string, ConnectionQuality>();
+                    _sessionVariableValues[sessionId] = new Dictionary<string, VariableChangeDto>();
                 }
                 
                 // Add client to session
@@ -199,7 +243,7 @@ public class RailwayHub : Hub
         if (_sessionControllers.TryGetValue(sessionId, out var controllerId))
         {
             var controllerInfo = _sessionClients[sessionId][controllerId];
-            await Clients.Caller.SendAsync("ControllerInfo", new { 
+            await Clients.Caller.SendAsync("ControlInfo", new { 
                 ClientId = controllerId, 
                 ClientName = controllerInfo.ClientName,
                 Role = controllerInfo.Role
@@ -222,6 +266,47 @@ public class RailwayHub : Hub
         if (elements.Count > 0)
         {
             await Clients.Caller.SendAsync("NetworkElementSync", elements);
+        }
+        
+        // Send all variable values for compatibility with the original code
+        var variables = _sessionVariableValues[sessionId].Values.ToList();
+        if (variables.Count > 0)
+        {
+            foreach (var variable in variables)
+            {
+                await Clients.Caller.SendAsync("ReceiveVariableChange", variable);
+            }
+        }
+    }
+    
+    public async Task SendVariableChange(string sessionId, VariableChangeDto variable)
+    {
+        try
+        {
+            // Add source client ID for tracking
+            variable.SourceClientId = Context.ConnectionId;
+            
+            // Update timestamp for conflict resolution
+            variable.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            
+            _logger.LogDebug("Variable change from {ConnectionId}: {VariableName}={Value}", 
+                Context.ConnectionId, variable.VariableName, variable.Value);
+            
+            // Store the variable value for this session
+            lock (_lockObj)
+            {
+                if (_sessionVariableValues.TryGetValue(sessionId, out var variables))
+                {
+                    variables[variable.VariableName] = variable;
+                }
+            }
+            
+            // Send to all clients in the session except the sender
+            await Clients.GroupExcept(sessionId, Context.ConnectionId).SendAsync("ReceiveVariableChange", variable);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in SendVariableChange for {ConnectionId}", Context.ConnectionId);
         }
     }
     
@@ -276,6 +361,90 @@ public class RailwayHub : Hub
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error in UpdateNetworkElement for {ConnectionId}", Context.ConnectionId);
+        }
+    }
+    
+    public async Task TransferControl(string sessionId, bool giving)
+    {
+        try
+        {
+            string currentController = null;
+
+            // Get the current controller
+            lock (_lockObj)
+            {
+                _sessionControllers.TryGetValue(sessionId, out currentController);
+            }
+
+            // For taking control (giving=false)
+            if (!giving)
+            {
+                // Check if this client already has control
+                if (currentController == Context.ConnectionId)
+                {
+                    await Clients.Caller.SendAsync("ControlStatusChanged", true);
+                    return;
+                }
+
+                // Otherwise, take control from current controller
+                string oldController = null;
+                lock (_lockObj)
+                {
+                    oldController = currentController;
+                    _sessionControllers[sessionId] = Context.ConnectionId;
+                }
+
+                // Notify the requester they now have control
+                await Clients.Caller.SendAsync("ControlStatusChanged", true);
+
+                // Notify previous controller if they exist
+                if (!string.IsNullOrEmpty(oldController))
+                {
+                    await Clients.Client(oldController).SendAsync("ControlStatusChanged", false);
+                }
+
+                // Notify all clients about the control change
+                await Clients.Group(sessionId).SendAsync("ControlTransferred", Context.ConnectionId, "client");
+            }
+            // For giving up control (giving=true)
+            else
+            {
+                // Check if this client currently has control
+                if (currentController == Context.ConnectionId)
+                {
+                    string newController = null;
+                    lock (_lockObj)
+                    {
+                        _sessionControllers.Remove(sessionId);
+                        
+                        // Find another client to give control to (if any)
+                        if (_sessionConnections.TryGetValue(sessionId, out var connections) &&
+                            connections.Count > 0 && connections.Any(c => c != Context.ConnectionId))
+                        {
+                            newController = connections.First(c => c != Context.ConnectionId);
+                            _sessionControllers[sessionId] = newController;
+                        }
+                    }
+
+                    // Notify this client they no longer have control
+                    await Clients.Caller.SendAsync("ControlStatusChanged", false);
+
+                    // If a new controller was assigned, notify them
+                    if (!string.IsNullOrEmpty(newController))
+                    {
+                        await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
+                        await Clients.Group(sessionId).SendAsync("ControlTransferred", newController, "client");
+                    }
+                    else
+                    {
+                        await Clients.Group(sessionId).SendAsync("ControlTransferred", "", "none");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in TransferControl for {ConnectionId}", Context.ConnectionId);
         }
     }
     
@@ -441,6 +610,26 @@ public class RailwayHub : Hub
         }
     }
     
+    public async Task RequestVariableSync(string sessionId)
+    {
+        try
+        {
+            // Send all variable values for this session to the requesting client
+            if (_sessionVariableValues.TryGetValue(sessionId, out var variables) && variables.Count > 0)
+            {
+                foreach (var variable in variables.Values)
+                {
+                    await Clients.Caller.SendAsync("ReceiveVariableChange", variable);
+                }
+                _logger.LogInformation("Synced {Count} variables to client {ClientId}", variables.Count, Context.ConnectionId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in RequestVariableSync for {ConnectionId}", Context.ConnectionId);
+        }
+    }
+    
     private bool IsController(string sessionId)
     {
         return _sessionControllers.TryGetValue(sessionId, out var controllerId) && 
@@ -451,6 +640,8 @@ public class RailwayHub : Hub
     {
         try
         {
+            _logger.LogInformation("Client {ConnectionId} disconnection started", Context.ConnectionId);
+            
             // Find all sessions this client is part of
             var sessionsToProcess = new List<string>();
             
@@ -569,6 +760,7 @@ public class RailwayHub : Hub
                         _sessionNetworkElements.Remove(sessionId);
                         _connectionQualities.Remove(sessionId);
                         _sessionControllers.Remove(sessionId);
+                        _sessionVariableValues.Remove(sessionId);
                         
                         _logger.LogInformation("Removed empty session {SessionId}", sessionId);
                     }
