@@ -127,7 +127,7 @@ public class LightChangeDto
 
 public class AutopilotChangeDto
 {
-    public int SubIndex { get; set; } // 0=master, 1=FD, 2=HDG, 3=NAV, 4=APR, 5=ALT, 6=VS, 7=FLC, 8=HDG setting, 9=ALT setting
+    public int SubIndex { get; set; } // 0=master, 1=FD, 2=HDG, 3=NAV, 4=APR, 5=ALT, 6=VS, 7=FLC, 8=HDG setting, 9=ALT s
     public double Value { get; set; } // 0.0 or 1.0 for mode toggles, or actual values for settings
 }
 
