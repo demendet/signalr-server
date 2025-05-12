@@ -42,7 +42,7 @@ var app = builder.Build();
 app.UseCors("CorsPolicy");
 
 // Map the hub
-app.MapHub<MergedCockpitHub>("/cockpithub");
+app.MapHub<MergedCockpitHub>("/sharedcockpithub");
 
 app.Run();
 
@@ -51,53 +51,49 @@ app.Run();
 // Position and flight dynamics data for basic synchronization
 public class AircraftPositionData
 {
-    // Position and attitude
     public double Latitude { get; set; }
     public double Longitude { get; set; }
     public double Altitude { get; set; }
     public double Pitch { get; set; }
     public double Bank { get; set; }
     public double Heading { get; set; }
-    
-    // Flight dynamics
     public double GroundSpeed { get; set; }
     public double VerticalSpeed { get; set; }
     public double AirspeedTrue { get; set; }
     public double AirspeedIndicated { get; set; }
-    public double OnGround { get; set; }
     
     // Control surfaces
-    public double Throttle { get; set; }
     public double Aileron { get; set; }
     public double Elevator { get; set; }
     public double Rudder { get; set; }
-    public double ElevatorTrimPosition { get; set; }
+    public double ElevatorTrim { get; set; }
+    public double FlapsHandlePosition { get; set; }
     
-    // Brakes and gear
+    // Brakes
     public double BrakeLeftPosition { get; set; }
     public double BrakeRightPosition { get; set; }
     public double ParkingBrakePosition { get; set; }
-    public int GearHandlePosition { get; set; }
-    public double FlapsHandlePosition { get; set; }
     
     // Engine controls
+    public double Throttle { get; set; }
     public double MixturePosition { get; set; }
     
+    // Gear
+    public int GearHandlePosition { get; set; }
+    
     // Motion data
+    public double OnGround { get; set; }
     public double VelocityBodyX { get; set; }
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
     
     // Lights
-    public double LightBeacon { get; set; }
-    public double LightLanding { get; set; }
-    public double LightTaxi { get; set; }
-    public double LightNav { get; set; }
-    public double LightStrobe { get; set; }
-    public double PitotHeat { get; set; }
-    
-    // Timestamp for ordering
-    public long Timestamp { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public bool LightBeacon { get; set; }
+    public bool LightLanding { get; set; }
+    public bool LightTaxi { get; set; }
+    public bool LightNav { get; set; }
+    public bool LightStrobe { get; set; }
+    public bool PitotHeat { get; set; }
 }
 
 // Dynamic variable change DTO
@@ -113,29 +109,7 @@ public class VariableChangeDto
     public long Timestamp { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); // For ordering and conflict resolution
 }
 
-// Light states DTO
-public class LightStatesDto
-{
-    public bool LightBeacon { get; set; }
-    public bool LightLanding { get; set; }
-    public bool LightTaxi { get; set; }
-    public bool LightNav { get; set; }
-    public bool LightStrobe { get; set; }
-}
-
-// Pitot heat state DTO
-public class PitotHeatStateDto
-{
-    public bool PitotHeatOn { get; set; }
-}
-
-// G1000 softkey press DTO
-public class G1000SoftkeyPressDto
-{
-    public int SoftkeyNumber { get; set; }
-}
-
-// Radio frequency change DTO
+// G1000 avionics synchronization DTOs
 public class RadioFrequencyChangeDto
 {
     public string RadioType { get; set; } // "NAV1", "NAV2", "COM1", "COM2"
@@ -143,56 +117,54 @@ public class RadioFrequencyChangeDto
     public double Value { get; set; } // Frequency value or 1.0 for swap
 }
 
-// Transponder change DTO
 public class TransponderChangeDto
 {
     public int SubIndex { get; set; } // 0=code, 1=mode, 2=ident
     public double Value { get; set; } // Code value, mode value, or 1.0 for ident
 }
 
-// ADF change DTO
 public class AdfChangeDto
 {
     public int SubIndex { get; set; } // 0=frequency, 1=card
     public double Value { get; set; } // Frequency or card value
 }
 
-// OBS change DTO
 public class ObsChangeDto
 {
     public int SubIndex { get; set; } // 0=NAV1, 1=NAV2, 2=GPS
     public double Value { get; set; } // OBS value in degrees
 }
 
-// Avionics change DTO
 public class AvionicsChangeDto
 {
     public int SubIndex { get; set; } // 0=master, 1=bus1, 2=bus2
     public double Value { get; set; } // 0.0 or 1.0 for off/on
 }
 
-// Electrical master change DTO
 public class ElectricalMasterChangeDto
 {
     public int SubIndex { get; set; } // 0=battery, 1=alternator
     public double Value { get; set; } // 0.0 or 1.0 for off/on
 }
 
-// Light change DTO
 public class LightChangeDto
 {
     public int SubIndex { get; set; } // 0=nav, 1=beacon, 2=landing, 3=taxi, 4=strobe, 5=panel, 6=pitot heat
     public double Value { get; set; } // 0.0 or 1.0 for off/on
 }
 
-// Autopilot change DTO
 public class AutopilotChangeDto
 {
-    public int SubIndex { get; set; } // 0=master, 1=FD, 2=HDG, 3=NAV, 4=APR, 5=ALT, 6=VS, 7=FLC, 8=HDG setting, etc.
+    public int SubIndex { get; set; } // 0=master, 1=FD, 2=HDG, 3=NAV, 4=APR, 5=ALT, 6=VS, 7=FLC, 8=HDG setting, 9=ALT s
     public double Value { get; set; } // 0.0 or 1.0 for mode toggles, or actual values for settings
 }
 
-// Connection quality enum
+public class G1000SoftkeyPressDto
+{
+    public int SoftkeyNumber { get; set; }
+}
+
+// Connection quality tracking for clients
 public enum ConnectionQuality
 {
     Unknown = 0,
@@ -339,6 +311,39 @@ public class MergedCockpitHub : Hub
         }
     }
     
+    #region Position Syncing Methods
+    
+    public async Task SendAircraftPosition(string sessionCode, AircraftPositionData data)
+    {
+        try
+        {
+            // Only process if this client has control
+            if (_sessionControlMap.TryGetValue(sessionCode, out var controllerId) && 
+                controllerId == Context.ConnectionId)
+            {
+                // Update timestamp for rate limiting
+                lock (_lockObj)
+                {
+                    _lastPositionUpdates[sessionCode] = DateTime.UtcNow;
+                }
+                
+                // Send to all clients in the session except the sender
+                await Clients.GroupExcept(sessionCode, Context.ConnectionId)
+                    .SendAsync("ReceiveAircraftPosition", data);
+            }
+            else
+            {
+                _logger.LogDebug("Ignoring position update from non-controller client {ConnectionId}", Context.ConnectionId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in SendAircraftPosition for {ConnectionId}", Context.ConnectionId);
+        }
+    }
+    
+    #endregion
+    
     #region Custom Variable Methods
     
     public async Task SendVariableChange(string sessionCode, VariableChangeDto variable)
@@ -394,192 +399,70 @@ public class MergedCockpitHub : Hub
     
     #endregion
     
-    #region Position and Control Methods
-    
-    public async Task SendAircraftPosition(string sessionCode, AircraftPositionData data)
-    {
-        try
-        {
-            // Only process if this client has control
-            if (_sessionControlMap.TryGetValue(sessionCode, out var controllerId) && 
-                controllerId == Context.ConnectionId)
-            {
-                // Update timestamp for rate limiting
-                lock (_lockObj)
-                {
-                    _lastPositionUpdates[sessionCode] = DateTime.UtcNow;
-                }
-                
-                // Send to all clients in the session except the sender
-                await Clients.GroupExcept(sessionCode, Context.ConnectionId)
-                    .SendAsync("ReceiveAircraftPosition", data);
-            }
-            else
-            {
-                _logger.LogDebug("Ignoring position update from non-controller client {ConnectionId}", Context.ConnectionId);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendAircraftPosition for {ConnectionId}", Context.ConnectionId);
-        }
-    }
-    
-    #endregion
-    
-    #region Avionics Methods
-    
-    public async Task SendLightStates(string sessionCode, LightStatesDto lights)
-    {
-        try
-        {
-            _logger.LogInformation("Received light states in session {SessionCode}", sessionCode);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightStates", lights);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendLightStates for {ConnectionId}", Context.ConnectionId);
-        }
-    }
-    
-    public async Task SendPitotHeatState(string sessionCode, PitotHeatStateDto state)
-    {
-        try
-        {
-            _logger.LogInformation("Received pitot heat state in session {SessionCode}: {State}", sessionCode, state.PitotHeatOn);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceivePitotHeatState", state);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendPitotHeatState for {ConnectionId}", Context.ConnectionId);
-        }
-    }
+    #region Avionics Syncing Methods
     
     public async Task SendG1000SoftkeyPress(string sessionCode, G1000SoftkeyPressDto press)
     {
-        try
-        {
-            _logger.LogInformation("Received G1000 softkey press in session {SessionCode}: {Number}", sessionCode, press.SoftkeyNumber);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveG1000SoftkeyPress", press);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendG1000SoftkeyPress for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received G1000 softkey press in session {SessionCode}: {Number}", sessionCode, press.SoftkeyNumber);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveG1000SoftkeyPress", press);
     }
-    
+
     public async Task SendRadioFrequencyChange(string sessionCode, RadioFrequencyChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received radio frequency change in session {SessionCode}: {Radio} subIndex={SubIndex}", 
-                sessionCode, change.RadioType, change.SubIndex);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveRadioFrequencyChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendRadioFrequencyChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received radio frequency change in session {SessionCode}: {Radio} subIndex={SubIndex}", 
+            sessionCode, change.RadioType, change.SubIndex);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveRadioFrequencyChange", change);
     }
 
     public async Task SendTransponderChange(string sessionCode, TransponderChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received transponder change in session {SessionCode}: subIndex={SubIndex}", 
-                sessionCode, change.SubIndex);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveTransponderChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendTransponderChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received transponder change in session {SessionCode}: subIndex={SubIndex}", 
+            sessionCode, change.SubIndex);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveTransponderChange", change);
     }
 
     public async Task SendAdfChange(string sessionCode, AdfChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received ADF change in session {SessionCode}: subIndex={SubIndex}", 
-                sessionCode, change.SubIndex);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAdfChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendAdfChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received ADF change in session {SessionCode}: subIndex={SubIndex}", 
+            sessionCode, change.SubIndex);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAdfChange", change);
     }
 
     public async Task SendObsChange(string sessionCode, ObsChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received OBS change in session {SessionCode}: subIndex={SubIndex}", 
-                sessionCode, change.SubIndex);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveObsChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendObsChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received OBS change in session {SessionCode}: subIndex={SubIndex}", 
+            sessionCode, change.SubIndex);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveObsChange", change);
     }
 
     public async Task SendAvionicsChange(string sessionCode, AvionicsChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received avionics change in session {SessionCode}: subIndex={SubIndex}", 
-                sessionCode, change.SubIndex);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAvionicsChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendAvionicsChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received avionics change in session {SessionCode}: subIndex={SubIndex}", 
+            sessionCode, change.SubIndex);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAvionicsChange", change);
     }
 
     public async Task SendElectricalMasterChange(string sessionCode, ElectricalMasterChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received electrical master change in session {SessionCode}: subIndex={SubIndex}", 
-                sessionCode, change.SubIndex);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveElectricalMasterChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendElectricalMasterChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received electrical master change in session {SessionCode}: subIndex={SubIndex}", 
+            sessionCode, change.SubIndex);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveElectricalMasterChange", change);
     }
 
     public async Task SendLightChange(string sessionCode, LightChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received light change in session {SessionCode}: subIndex={SubIndex}, value={Value}", 
-                sessionCode, change.SubIndex, change.Value);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendLightChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received light change in session {SessionCode}: subIndex={SubIndex}, value={Value}", 
+            sessionCode, change.SubIndex, change.Value);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveLightChange", change);
     }
 
     public async Task SendAutopilotChange(string sessionCode, AutopilotChangeDto change)
     {
-        try
-        {
-            _logger.LogInformation("Received autopilot change in session {SessionCode}: subIndex={SubIndex}", 
-                sessionCode, change.SubIndex);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAutopilotChange", change);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in SendAutopilotChange for {ConnectionId}", Context.ConnectionId);
-        }
+        _logger.LogInformation("Received autopilot change in session {SessionCode}: subIndex={SubIndex}", 
+            sessionCode, change.SubIndex);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAutopilotChange", change);
     }
-    
+
     #endregion
     
     #region Control Management
@@ -771,7 +654,7 @@ public class MergedCockpitHub : Hub
     
     #endregion
     
-    #region Connection Management
+    #region Connection Health Monitoring
     
     public async Task SendHeartbeat(string sessionCode)
     {
@@ -796,6 +679,8 @@ public class MergedCockpitHub : Hub
             _logger.LogError(ex, "Error in SendHeartbeat for {ConnectionId}", Context.ConnectionId);
         }
     }
+    
+    #endregion
     
     public override async Task OnDisconnectedAsync(Exception exception)
     {
@@ -902,6 +787,4 @@ public class MergedCockpitHub : Hub
             await base.OnDisconnectedAsync(exception);
         }
     }
-    
-    #endregion
 } 
