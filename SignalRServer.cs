@@ -101,12 +101,12 @@ public class VariableChangeDto
 {
     public string VariableName { get; set; }
     public string VariableType { get; set; } 
-    public string AccessMethod { get; set; }
+    public string ValueType { get; set; }  // Changed from AccessMethod to ValueType
     public string Value { get; set; }
     public Dictionary<string, string> Properties { get; set; } = new Dictionary<string, string>();
-    public bool IsBroadcast { get; set; } = false; // Flag to prevent echo loops
-    public string SourceClientId { get; set; } // Identifies which client sent the change
-    public long Timestamp { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); // For ordering and conflict resolution
+    public bool IsBroadcast { get; set; } = false;
+    public string SourceClientId { get; set; }
+    public long Timestamp { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }
 
 // G1000 avionics synchronization DTOs
