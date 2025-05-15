@@ -5,11 +5,16 @@ using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add console logging
+// Add console logging - reduce logging in production
 builder.Logging.AddConsole();
+if (builder.Environment.IsProduction())
+{
+    builder.Logging.SetMinimumLevel(LogLevel.Warning);
+}
 
 // Configure CORS properly
 builder.Services.AddCors(options =>
@@ -23,15 +28,22 @@ builder.Services.AddCors(options =>
     });
 });
 
-// Add SignalR services with increased buffer size
+// Add SignalR services with optimized settings for realtime performance
 builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 102400; // 100KB
-    options.StreamBufferCapacity = 20;
+    options.StreamBufferCapacity = 50; // Increased from 20
     options.EnableDetailedErrors = true; // Helpful for debugging
-    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+    options.KeepAliveInterval = TimeSpan.FromSeconds(5); // Reduced for better responsiveness
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(15); // Reduced for faster timeout detection
+}).AddJsonProtocol(options => {
+    // Minimize JSON size
+    options.PayloadSerializerOptions.IgnoreNullValues = true;
+    options.PayloadSerializerOptions.WriteIndented = false;
 });
+
+// Add memory cache for potential throttling
+builder.Services.AddMemoryCache();
 
 var app = builder.Build();
 
@@ -47,6 +59,9 @@ app.Run();
 
 public class AircraftData
 {
+    // Add timestamp for client-side interpolation
+    public long Timestamp { get; set; } // Milliseconds since epoch
+    
     public double Latitude { get; set; }
     public double Longitude { get; set; }
     public double Altitude { get; set; }
@@ -79,6 +94,166 @@ public class AircraftData
     public double LightStrobe { get; set; }
     public double PitotHeat { get; set; }
 }
+
+// --- Built-in Interpolation for Smooth Aircraft Movement ---
+
+// This class should be used on the client-side (monitoring pilot side) part of your application
+public class FlightInterpolation
+{
+    // Previous and current aircraft data
+    private AircraftData _previousData;
+    private AircraftData _currentData;
+    
+    // Time tracking
+    private long _lastUpdateTime;
+    
+    // Initialize with empty data
+    public FlightInterpolation()
+    {
+        _previousData = null;
+        _currentData = null;
+        _lastUpdateTime = 0;
+    }
+    
+    // Call this when receiving new aircraft data from server
+    public void UpdateAircraftData(AircraftData newData)
+    {
+        // If we have current data, move it to previous
+        if (_currentData != null)
+        {
+            _previousData = _currentData;
+        }
+        else
+        {
+            // First data received
+            _previousData = newData;
+        }
+        
+        // Update current data and timestamp
+        _currentData = newData;
+        _lastUpdateTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    }
+    
+    // Get interpolated position for rendering - CALL THIS IN YOUR RENDER LOOP
+    public AircraftData GetInterpolatedPosition()
+    {
+        // If we don't have enough data yet, return what we have
+        if (_previousData == null || _currentData == null)
+        {
+            return _currentData ?? _previousData;
+        }
+        
+        // Calculate how far we are between previous and current data in time (0.0 to 1.0)
+        long currentTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long timeDiff = _currentData.Timestamp - _previousData.Timestamp;
+        
+        // Guard against division by zero
+        if (timeDiff <= 0)
+        {
+            return _currentData;
+        }
+        
+        // Calculate interpolation factor (0.0 to 1.0)
+        float factor = Math.Clamp((float)(currentTime - _previousData.Timestamp) / timeDiff, 0.0f, 1.0f);
+        
+        // Create interpolated data
+        var result = new AircraftData
+        {
+            Timestamp = currentTime,
+            
+            // Linear interpolation for position data
+            Latitude = Lerp(_previousData.Latitude, _currentData.Latitude, factor),
+            Longitude = Lerp(_previousData.Longitude, _currentData.Longitude, factor),
+            Altitude = Lerp(_previousData.Altitude, _currentData.Altitude, factor),
+            
+            // Spherical interpolation for rotational data
+            Pitch = SLerp(_previousData.Pitch, _currentData.Pitch, factor),
+            Bank = SLerp(_previousData.Bank, _currentData.Bank, factor),
+            Heading = AngleLerp(_previousData.Heading, _currentData.Heading, factor),
+            
+            // Linear interpolation for everything else
+            Throttle = Lerp(_previousData.Throttle, _currentData.Throttle, factor),
+            Aileron = Lerp(_previousData.Aileron, _currentData.Aileron, factor),
+            Elevator = Lerp(_previousData.Elevator, _currentData.Elevator, factor),
+            Rudder = Lerp(_previousData.Rudder, _currentData.Rudder, factor),
+            ElevatorTrimPosition = Lerp(_previousData.ElevatorTrimPosition, _currentData.ElevatorTrimPosition, factor),
+            
+            // Non-interpolated data (use current state)
+            BrakeLeft = _currentData.BrakeLeft,
+            BrakeRight = _currentData.BrakeRight,
+            ParkingBrake = _currentData.ParkingBrake,
+            Mixture = _currentData.Mixture,
+            Flaps = _currentData.Flaps,
+            Gear = _currentData.Gear,
+            
+            // Calculated velocities using interpolation
+            GroundSpeed = Lerp(_previousData.GroundSpeed, _currentData.GroundSpeed, factor),
+            VerticalSpeed = Lerp(_previousData.VerticalSpeed, _currentData.VerticalSpeed, factor),
+            AirspeedTrue = Lerp(_previousData.AirspeedTrue, _currentData.AirspeedTrue, factor),
+            AirspeedIndicated = Lerp(_previousData.AirspeedIndicated, _currentData.AirspeedIndicated, factor),
+            
+            // Other non-interpolated state data
+            OnGround = _currentData.OnGround,
+            VelocityBodyX = Lerp(_previousData.VelocityBodyX, _currentData.VelocityBodyX, factor),
+            VelocityBodyY = Lerp(_previousData.VelocityBodyY, _currentData.VelocityBodyY, factor),
+            VelocityBodyZ = Lerp(_previousData.VelocityBodyZ, _currentData.VelocityBodyZ, factor),
+            
+            // Light states - don't interpolate these
+            LightBeacon = _currentData.LightBeacon,
+            LightLanding = _currentData.LightLanding,
+            LightTaxi = _currentData.LightTaxi,
+            LightNav = _currentData.LightNav,
+            LightStrobe = _currentData.LightStrobe,
+            PitotHeat = _currentData.PitotHeat
+        };
+        
+        return result;
+    }
+    
+    // Linear interpolation between two values
+    private double Lerp(double a, double b, float t)
+    {
+        return a + (b - a) * t;
+    }
+    
+    // Spherical linear interpolation (for rotations)
+    private double SLerp(double a, double b, float t)
+    {
+        // Convert to radians
+        double angleA = a * Math.PI / 180.0;
+        double angleB = b * Math.PI / 180.0;
+        
+        // Create quaternions
+        Quaternion qA = Quaternion.CreateFromYawPitchRoll(0, 0, (float)angleA);
+        Quaternion qB = Quaternion.CreateFromYawPitchRoll(0, 0, (float)angleB);
+        
+        // Spherical interpolation
+        Quaternion result = Quaternion.Slerp(qA, qB, t);
+        
+        // Convert back to angle
+        double slerpedAngle = Math.Atan2(2.0 * (result.W * result.Z + result.X * result.Y), 
+                                        1.0 - 2.0 * (result.Y * result.Y + result.Z * result.Z));
+        
+        // Return in degrees
+        return slerpedAngle * 180.0 / Math.PI;
+    }
+    
+    // Special interpolation for angles that handles wrap-around (0-360)
+    private double AngleLerp(double a, double b, float t)
+    {
+        // Find the shortest path
+        double diff = ((b - a + 540) % 360) - 180;
+        return (a + diff * t + 360) % 360;
+    }
+}
+
+// To use the interpolation in the client side of your app:
+// 1. Create an instance: FlightInterpolation interpolator = new FlightInterpolation();
+// 2. When receiving data: interpolator.UpdateAircraftData(receivedData);
+// 3. In your render loop: var smoothData = interpolator.GetInterpolatedPosition();
+// 4. Apply smoothData to your aircraft model
+
+// ... existing LightStatesDto and other DTOs ...
 
 public class LightStatesDto
 {
@@ -154,6 +329,11 @@ public class CockpitHub : Hub
     private readonly ILogger<CockpitHub> _logger;
     private static readonly Dictionary<string, string> _sessionControlMap = new();
     private static readonly Dictionary<string, List<string>> _sessionConnections = new();
+    
+    // Track last send time per connection to enable throttling
+    private static readonly Dictionary<string, long> _lastSendTime = new();
+    // Minimum time between position updates (ms)
+    private const int MIN_UPDATE_INTERVAL = 30; // ~30-33 fps is sufficient for smooth animation
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
@@ -187,8 +367,21 @@ public class CockpitHub : Hub
     {
         if (_sessionControlMap.TryGetValue(sessionCode, out string controlId) && controlId == Context.ConnectionId)
         {
-            _logger.LogInformation("Received data in session {SessionCode}: Alt={Alt:F1}", sessionCode, data.Altitude);
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+            // Apply throttling to avoid network congestion
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            
+            if (!_lastSendTime.TryGetValue(Context.ConnectionId, out long lastSend) || (now - lastSend) >= MIN_UPDATE_INTERVAL)
+            {
+                // Set timestamp on server to ensure accuracy
+                data.Timestamp = now;
+                
+                _lastSendTime[Context.ConnectionId] = now;
+                
+                // Reduce logging for performance - log at debug level only
+                _logger.LogDebug("Received data in session {SessionCode}: Alt={Alt:F1}", sessionCode, data.Altitude);
+                
+                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+            }
         }
     }
     
@@ -299,8 +492,17 @@ public class CockpitHub : Hub
         }
     }
     
+    public override async Task OnConnectedAsync()
+    {
+        _logger.LogInformation("Client connected: {ConnectionId}", Context.ConnectionId);
+        await base.OnConnectedAsync();
+    }
+    
     public override async Task OnDisconnectedAsync(Exception exception)
     {
+        // Clean up throttling tracker
+        _lastSendTime.Remove(Context.ConnectionId);
+        
         var sessions = _sessionConnections.Where(kvp => kvp.Value.Contains(Context.ConnectionId))
                                            .Select(kvp => kvp.Key)
                                            .ToList();
@@ -332,4 +534,4 @@ public class CockpitHub : Hub
         
         await base.OnDisconnectedAsync(exception);
     }
-}
+} 
