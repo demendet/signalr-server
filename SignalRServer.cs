@@ -51,6 +51,8 @@ app.Run();
 // Position and flight dynamics data for basic synchronization
 public class AircraftPositionData
 {
+
+    public bool IsLocalData { get; set; }
     public double Latitude { get; set; }
     public double Longitude { get; set; }
     public double Altitude { get; set; }
@@ -310,23 +312,31 @@ public class MergedCockpitHub : Hub
             _logger.LogError(ex, "Error in JoinSession for {ConnectionId}", Context.ConnectionId);
         }
     }
-    
+
     #region Position Syncing Methods
-    
+
     public async Task SendAircraftPosition(string sessionCode, AircraftPositionData data)
     {
         try
         {
             // Only process if this client has control
-            if (_sessionControlMap.TryGetValue(sessionCode, out var controllerId) && 
+            if (_sessionControlMap.TryGetValue(sessionCode, out var controllerId) &&
                 controllerId == Context.ConnectionId)
             {
-                // Update timestamp for rate limiting
+                // Check rate limiting - don't process updates too quickly
                 lock (_lockObj)
                 {
+                    if (_lastPositionUpdates.TryGetValue(sessionCode, out var lastUpdate) &&
+                        (DateTime.UtcNow - lastUpdate).TotalMilliseconds < 30) // Max 33 updates per second
+                    {
+                        return; // Skip this update - too frequent
+                    }
                     _lastPositionUpdates[sessionCode] = DateTime.UtcNow;
                 }
-                
+
+                // Ensure IsLocalData is false for network transmission
+                data.IsLocalData = false;
+
                 // Send to all clients in the session except the sender
                 await Clients.GroupExcept(sessionCode, Context.ConnectionId)
                     .SendAsync("ReceiveAircraftPosition", data);
@@ -341,24 +351,86 @@ public class MergedCockpitHub : Hub
             _logger.LogError(ex, "Error in SendAircraftPosition for {ConnectionId}", Context.ConnectionId);
         }
     }
-    
+
+    // Add this method to periodically check connection health
+    public void CheckConnectionHealth(string sessionCode)
+    {
+        try
+        {
+            lock (_lockObj)
+            {
+                if (_clientHealthStatus.TryGetValue(sessionCode, out var clientsHealth))
+                {
+                    DateTime now = DateTime.UtcNow;
+
+                    foreach (var kvp in clientsHealth)
+                    {
+                        string clientId = kvp.Key;
+                        ClientHealthStatus health = kvp.Value;
+
+                        // Check if client has missed heartbeats
+                        TimeSpan timeSinceLastHeartbeat = now - health.LastHeartbeat;
+
+                        if (timeSinceLastHeartbeat.TotalSeconds > 10)
+                        {
+                            health.MissedHeartbeats++;
+
+                            // Lower connection quality for missed heartbeats
+                            if (health.MissedHeartbeats >= 3)
+                            {
+                                health.ConnectionQuality = ConnectionQuality.Poor;
+                            }
+
+                            // If client has missed too many heartbeats, they might be disconnected
+                            if (health.MissedHeartbeats >= 5)
+                            {
+                                _logger.LogWarning("Client {ClientId} has missed {Count} heartbeats",
+                                    clientId, health.MissedHeartbeats);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking connection health");
+        }
+    }
+
+// Add this method to notify clients of errors
+public async Task NotifyError(string sessionCode, string errorType, string message)
+{
+    try
+    {
+        await Clients.Group(sessionCode).SendAsync("HubError", errorType, message);
+        _logger.LogWarning("Hub error {ErrorType}: {Message}", errorType, message);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Error in NotifyError");
+    }
+}
+
     #endregion
-    
+
+
+
     #region Custom Variable Methods
-    
+
     public async Task SendVariableChange(string sessionCode, VariableChangeDto variable)
     {
         try
         {
             // Add source client ID for tracking
             variable.SourceClientId = Context.ConnectionId;
-            
+
             // Update timestamp for conflict resolution
             variable.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            
-            _logger.LogDebug("Variable change from {ConnectionId}: {VariableName}={Value}", 
+
+            _logger.LogDebug("Variable change from {ConnectionId}: {VariableName}={Value}",
                 Context.ConnectionId, variable.VariableName, variable.Value);
-            
+
             // Store the variable value for this session
             lock (_lockObj)
             {
@@ -367,7 +439,7 @@ public class MergedCockpitHub : Hub
                     variables[variable.VariableName] = variable;
                 }
             }
-            
+
             // Send to all clients in the session except the sender
             await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("ReceiveVariableChange", variable);
         }
