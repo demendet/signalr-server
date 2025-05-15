@@ -100,12 +100,29 @@ public class AircraftData
 // This class should be used on the client-side (monitoring pilot side) part of your application
 public class FlightInterpolation
 {
-    // Previous and current aircraft data
+    // Store multiple data points for better trajectory prediction
+    private List<AircraftData> _dataHistory = new List<AircraftData>();
+    private const int MAX_HISTORY_POINTS = 5;
+    
+    // Current state tracking
     private AircraftData _previousData;
     private AircraftData _currentData;
     
-    // Time tracking
+    // Jitter buffer system
+    private long _renderDelayMs = 50; // Small delay to allow for better smoothing (50ms buffer)
     private long _lastUpdateTime;
+    
+    // Smoothing factors
+    private const float ROTATION_SMOOTHING = 0.92f;  // Very aggressive rotation smoothing (0-1)
+    private const float POSITION_SMOOTHING = 0.82f;  // Strong position smoothing (0-1)
+    
+    // Cached smoothed values
+    private double _smoothedPitch = 0;
+    private double _smoothedBank = 0;
+    private double _smoothedHeading = 0;
+    private double _smoothedLatitude = 0;
+    private double _smoothedLongitude = 0;
+    private double _smoothedAltitude = 0;
     
     // Initialize with empty data
     public FlightInterpolation()
@@ -127,11 +144,24 @@ public class FlightInterpolation
         {
             // First data received
             _previousData = newData;
+            
+            // Initialize smoothed values
+            _smoothedPitch = newData.Pitch;
+            _smoothedBank = newData.Bank;
+            _smoothedHeading = newData.Heading;
+            _smoothedLatitude = newData.Latitude;
+            _smoothedLongitude = newData.Longitude;
+            _smoothedAltitude = newData.Altitude;
         }
         
         // Update current data and timestamp
         _currentData = newData;
         _lastUpdateTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        
+        // Add to history buffer, maintaining limited size
+        _dataHistory.Add(newData);
+        if (_dataHistory.Count > MAX_HISTORY_POINTS)
+            _dataHistory.RemoveAt(0);
     }
     
     // Get interpolated position for rendering - CALL THIS IN YOUR RENDER LOOP
@@ -143,8 +173,8 @@ public class FlightInterpolation
             return _currentData ?? _previousData;
         }
         
-        // Calculate how far we are between previous and current data in time (0.0 to 1.0)
-        long currentTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Normalize timestamps to account for jitter buffer
+        long currentTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _renderDelayMs;
         long timeDiff = _currentData.Timestamp - _previousData.Timestamp;
         
         // Guard against division by zero
@@ -156,28 +186,62 @@ public class FlightInterpolation
         // Calculate interpolation factor (0.0 to 1.0)
         float factor = Math.Clamp((float)(currentTime - _previousData.Timestamp) / timeDiff, 0.0f, 1.0f);
         
-        // For stability in fast turns, add a small amount of prediction based on velocity
-        // This helps smooth out rapid changes when packets are delayed
-        bool useExtrapolation = factor >= 0.9f; // Only predict when we're close to needing a new packet (was 0.85)
-        float predictFactor = useExtrapolation ? (factor - 0.9f) * 1.0f : 0f; // Scale from 0-0.1 (was 0-0.3)
+        // Enable advanced prediction when we have enough history
+        // Uses acceleration trends for more accurate predictions
+        bool useAdvancedPrediction = _dataHistory.Count >= 3 && factor > 0.8f;
+        
+        // Calculate derivatives (velocities and accelerations) for better prediction
+        Vector3 velocityEstimate = CalculateVelocityEstimate();
+        Vector3 accelerationEstimate = CalculateAccelerationEstimate();
+        
+        // Apply advanced prediction with acceleration compensation
+        float predictFactor = useAdvancedPrediction ? (factor - 0.8f) * 1.0f : 0f;
+        
+        // Regular linear interpolation for position
+        double interpolatedLatitude = Lerp(_previousData.Latitude, _currentData.Latitude, factor);
+        double interpolatedLongitude = Lerp(_previousData.Longitude, _currentData.Longitude, factor);
+        double interpolatedAltitude = Lerp(_previousData.Altitude, _currentData.Altitude, factor);
+        
+        // Apply prediction offset based on velocity and acceleration
+        if (useAdvancedPrediction)
+        {
+            double predictionTime = predictFactor * timeDiff / 1000.0; // Convert to seconds
+            
+            // Position prediction using physics formulas: p = p0 + v*t + 0.5*a*t^2
+            interpolatedLatitude += velocityEstimate.X * predictionTime + 0.5 * accelerationEstimate.X * predictionTime * predictionTime;
+            interpolatedLongitude += velocityEstimate.Y * predictionTime + 0.5 * accelerationEstimate.Y * predictionTime * predictionTime;
+            interpolatedAltitude += velocityEstimate.Z * predictionTime + 0.5 * accelerationEstimate.Z * predictionTime * predictionTime;
+        }
+        
+        // Apply exponential smoothing to all position values
+        _smoothedLatitude = ExponentialSmooth(_smoothedLatitude, interpolatedLatitude, POSITION_SMOOTHING);
+        _smoothedLongitude = ExponentialSmooth(_smoothedLongitude, interpolatedLongitude, POSITION_SMOOTHING);
+        _smoothedAltitude = ExponentialSmooth(_smoothedAltitude, interpolatedAltitude, POSITION_SMOOTHING);
+        
+        // Special angular smoothing for rotational values - spherical
+        double interpolatedPitch = SLerp(_previousData.Pitch, _currentData.Pitch, factor);
+        double interpolatedBank = SLerp(_previousData.Bank, _currentData.Bank, factor);
+        double interpolatedHeading = AngleLerp(_previousData.Heading, _currentData.Heading, factor);
+        
+        // Apply exponential smoothing to rotational values
+        _smoothedPitch = AngleExponentialSmooth(_smoothedPitch, interpolatedPitch, ROTATION_SMOOTHING);
+        _smoothedBank = AngleExponentialSmooth(_smoothedBank, interpolatedBank, ROTATION_SMOOTHING);
+        _smoothedHeading = AngleExponentialSmooth(_smoothedHeading, interpolatedHeading, ROTATION_SMOOTHING);
         
         // Create interpolated data
         var result = new AircraftData
         {
             Timestamp = currentTime,
             
-            // Linear interpolation for position data with slight prediction for smoother transitions
-            Latitude = Lerp(_previousData.Latitude, _currentData.Latitude, factor) + 
-                      (useExtrapolation ? predictFactor * (_currentData.Latitude - _previousData.Latitude) : 0),
-            Longitude = Lerp(_previousData.Longitude, _currentData.Longitude, factor) + 
-                       (useExtrapolation ? predictFactor * (_currentData.Longitude - _previousData.Longitude) : 0),
-            Altitude = Lerp(_previousData.Altitude, _currentData.Altitude, factor) + 
-                      (useExtrapolation ? predictFactor * (_currentData.Altitude - _previousData.Altitude) : 0),
+            // Apply the ultra-smooth values
+            Latitude = _smoothedLatitude,
+            Longitude = _smoothedLongitude,
+            Altitude = _smoothedAltitude,
             
-            // Spherical interpolation for rotational data - with no extrapolation on rotations for stability
-            Pitch = SLerp(_previousData.Pitch, _currentData.Pitch, factor),
-            Bank = SLerp(_previousData.Bank, _currentData.Bank, factor),
-            Heading = AngleLerp(_previousData.Heading, _currentData.Heading, factor),
+            // Super smooth rotations
+            Pitch = _smoothedPitch,
+            Bank = _smoothedBank,
+            Heading = _smoothedHeading,
             
             // Linear interpolation for everything else with slight prediction for controls
             Throttle = Lerp(_previousData.Throttle, _currentData.Throttle, factor),
@@ -194,27 +258,26 @@ public class FlightInterpolation
             Flaps = _currentData.Flaps,
             Gear = _currentData.Gear,
             
-            // Calculated velocities using interpolation with minimal prediction for smoother changes
-            // Velocity data is especially sensitive - too much extrapolation causes jerky movement
+            // Velocity always requires prediction for smooth transitions
             GroundSpeed = Lerp(_previousData.GroundSpeed, _currentData.GroundSpeed, factor) + 
-                         (useExtrapolation ? predictFactor * 0.5 * (_currentData.GroundSpeed - _previousData.GroundSpeed) : 0),
+                         (useAdvancedPrediction ? predictFactor * 0.5 * (_currentData.GroundSpeed - _previousData.GroundSpeed) : 0),
             VerticalSpeed = Lerp(_previousData.VerticalSpeed, _currentData.VerticalSpeed, factor) + 
-                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VerticalSpeed - _previousData.VerticalSpeed) : 0),
+                           (useAdvancedPrediction ? predictFactor * 0.5 * (_currentData.VerticalSpeed - _previousData.VerticalSpeed) : 0),
             AirspeedTrue = Lerp(_previousData.AirspeedTrue, _currentData.AirspeedTrue, factor) + 
-                          (useExtrapolation ? predictFactor * 0.5 * (_currentData.AirspeedTrue - _previousData.AirspeedTrue) : 0),
+                          (useAdvancedPrediction ? predictFactor * 0.5 * (_currentData.AirspeedTrue - _previousData.AirspeedTrue) : 0),
             AirspeedIndicated = Lerp(_previousData.AirspeedIndicated, _currentData.AirspeedIndicated, factor) + 
-                               (useExtrapolation ? predictFactor * 0.5 * (_currentData.AirspeedIndicated - _previousData.AirspeedIndicated) : 0),
+                               (useAdvancedPrediction ? predictFactor * 0.5 * (_currentData.AirspeedIndicated - _previousData.AirspeedIndicated) : 0),
             
             // Other non-interpolated state data
             OnGround = _currentData.OnGround,
             
-            // Velocity interpolation with reduced prediction (50%) for smoother transitions
+            // Body velocities with smoothed prediction
             VelocityBodyX = Lerp(_previousData.VelocityBodyX, _currentData.VelocityBodyX, factor) + 
-                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VelocityBodyX - _previousData.VelocityBodyX) : 0),
+                           (useAdvancedPrediction ? predictFactor * 0.5 * (_currentData.VelocityBodyX - _previousData.VelocityBodyX) : 0),
             VelocityBodyY = Lerp(_previousData.VelocityBodyY, _currentData.VelocityBodyY, factor) + 
-                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VelocityBodyY - _previousData.VelocityBodyY) : 0),
+                           (useAdvancedPrediction ? predictFactor * 0.5 * (_currentData.VelocityBodyY - _previousData.VelocityBodyY) : 0),
             VelocityBodyZ = Lerp(_previousData.VelocityBodyZ, _currentData.VelocityBodyZ, factor) + 
-                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VelocityBodyZ - _previousData.VelocityBodyZ) : 0),
+                           (useAdvancedPrediction ? predictFactor * 0.5 * (_currentData.VelocityBodyZ - _previousData.VelocityBodyZ) : 0),
             
             // Light states - don't interpolate these
             LightBeacon = _currentData.LightBeacon,
@@ -226,6 +289,90 @@ public class FlightInterpolation
         };
         
         return result;
+    }
+    
+    // Calculate estimated velocity based on historical data (degrees/ms or units/ms)
+    private Vector3 CalculateVelocityEstimate()
+    {
+        if (_dataHistory.Count < 2)
+            return Vector3.Zero;
+            
+        // Use the most recent data points for velocity calculation
+        var newest = _dataHistory[_dataHistory.Count - 1];
+        var older = _dataHistory[_dataHistory.Count - 2];
+        
+        long timeDelta = newest.Timestamp - older.Timestamp;
+        if (timeDelta <= 0) 
+            return Vector3.Zero;
+            
+        float timeDeltaSec = timeDelta / 1000.0f; // Convert to seconds
+        
+        return new Vector3(
+            (float)((newest.Latitude - older.Latitude) / timeDeltaSec),
+            (float)((newest.Longitude - older.Longitude) / timeDeltaSec),
+            (float)((newest.Altitude - older.Altitude) / timeDeltaSec)
+        );
+    }
+    
+    // Calculate estimated acceleration based on historical data (degrees/ms² or units/ms²)
+    private Vector3 CalculateAccelerationEstimate()
+    {
+        if (_dataHistory.Count < 3)
+            return Vector3.Zero;
+            
+        // Need at least 3 points for acceleration
+        var newest = _dataHistory[_dataHistory.Count - 1];
+        var middle = _dataHistory[_dataHistory.Count - 2];
+        var oldest = _dataHistory[_dataHistory.Count - 3];
+        
+        long timeDelta1 = newest.Timestamp - middle.Timestamp;
+        long timeDelta2 = middle.Timestamp - oldest.Timestamp;
+        
+        if (timeDelta1 <= 0 || timeDelta2 <= 0)
+            return Vector3.Zero;
+            
+        // Calculate velocities at each segment
+        float vel1Lat = (float)((newest.Latitude - middle.Latitude) / timeDelta1);
+        float vel1Lon = (float)((newest.Longitude - middle.Longitude) / timeDelta1);
+        float vel1Alt = (float)((newest.Altitude - middle.Altitude) / timeDelta1);
+        
+        float vel2Lat = (float)((middle.Latitude - oldest.Latitude) / timeDelta2);
+        float vel2Lon = (float)((middle.Longitude - oldest.Longitude) / timeDelta2);
+        float vel2Alt = (float)((middle.Altitude - oldest.Altitude) / timeDelta2);
+        
+        // Calculate acceleration (change in velocity over time)
+        float timeSpan = (timeDelta1 + timeDelta2) / 2000.0f; // Average time in seconds
+        
+        // Dampen acceleration to avoid overcorrection
+        float dampening = 0.5f;
+        
+        return new Vector3(
+            (vel1Lat - vel2Lat) / timeSpan * dampening,
+            (vel1Lon - vel2Lon) / timeSpan * dampening,
+            (vel1Alt - vel2Alt) / timeSpan * dampening
+        );
+    }
+    
+    // Exponential smoothing for value dampening (reduces jitter)
+    private double ExponentialSmooth(double previousSmoothed, double current, float smoothingFactor)
+    {
+        return previousSmoothed * smoothingFactor + current * (1 - smoothingFactor);
+    }
+    
+    // Angular exponential smoothing that handles wrapping
+    private double AngleExponentialSmooth(double previousSmoothed, double current, float smoothingFactor)
+    {
+        // Normalize angles
+        previousSmoothed = (previousSmoothed % 360 + 360) % 360;
+        current = (current % 360 + 360) % 360;
+        
+        // Find shortest path
+        double diff = ((current - previousSmoothed + 540) % 360) - 180;
+        
+        // Apply smoothing along shortest path
+        double smoothed = (previousSmoothed + diff * (1 - smoothingFactor)) % 360;
+        
+        return (smoothed + 360) % 360;
     }
     
     // Linear interpolation between two values
@@ -603,4 +750,21 @@ public class CockpitHub : Hub
         
         await base.OnDisconnectedAsync(exception);
     }
+}
+
+// Simple Vector3 implementation for calculations
+public struct Vector3
+{
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float Z { get; set; }
+    
+    public Vector3(float x, float y, float z)
+    {
+        X = x;
+        Y = y;
+        Z = z;
+    }
+    
+    public static Vector3 Zero => new Vector3(0, 0, 0);
 } 
