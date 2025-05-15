@@ -32,12 +32,12 @@ builder.Services.AddCors(options =>
 builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 102400; // 100KB
-    options.StreamBufferCapacity = 50; // Increased from 20
+    options.StreamBufferCapacity = 30; // Reduced from 50 to decrease memory usage
     options.EnableDetailedErrors = true; // Helpful for debugging
-    options.KeepAliveInterval = TimeSpan.FromSeconds(2); // Reduced to 2 seconds for more reliable connection
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(10); // Reduced for faster timeout detection
-    options.HandshakeTimeout = TimeSpan.FromSeconds(5); // Explicit handshake timeout
-    options.MaximumParallelInvocationsPerClient = 1; // Limit to 1 to ensure ordered delivery
+    options.KeepAliveInterval = TimeSpan.FromSeconds(5); // Increased from 2 to 5 seconds for less network overhead
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(15); // Increased for more stability
+    options.HandshakeTimeout = TimeSpan.FromSeconds(10); // Increased for more reliable connections
+    options.MaximumParallelInvocationsPerClient = 1; // Ensure ordered delivery
 }).AddJsonProtocol(options => {
     // Minimize JSON size
     options.PayloadSerializerOptions.IgnoreNullValues = true;
@@ -266,6 +266,9 @@ public class FlightInterpolation
     // Create a prediction based on current position and velocities
     private AircraftData CreatePrediction(AircraftData currentData, long predictionTimeMs, bool fullPrediction)
     {
+        // For stability, limit prediction time 
+        predictionTimeMs = Math.Min(predictionTimeMs, 50); // Max 50ms prediction to prevent overshooting
+        
         // Convert prediction time to seconds for physical calculations
         float predictionTimeSec = predictionTimeMs / 1000.0f;
         
@@ -311,7 +314,8 @@ public class FlightInterpolation
         if (!fullPrediction)
             return prediction;
         
-        // For a more accurate prediction, use velocity data
+        // Simplified prediction - only update position based on velocity
+        // Avoid predicting rotations which can cause oscillations
         
         // Update altitude based on vertical speed
         prediction.Altitude += currentData.VerticalSpeed * predictionTimeSec;
@@ -335,27 +339,7 @@ public class FlightInterpolation
         prediction.Latitude += latChange;
         prediction.Longitude += lonChange;
         
-        // Predict angular rates based on control inputs (simplified)
-        // This is a very basic model and would need to be tuned for specific aircraft
-        if (Math.Abs(currentData.Aileron) > 0.1)
-        {
-            // Roll rate is roughly proportional to aileron deflection
-            prediction.Bank += currentData.Aileron * 30 * predictionTimeSec; 
-        }
-        
-        if (Math.Abs(currentData.Elevator) > 0.1)
-        {
-            // Pitch rate is roughly proportional to elevator deflection
-            prediction.Pitch += currentData.Elevator * 15 * predictionTimeSec;
-        }
-        
-        if (Math.Abs(currentData.Rudder) > 0.1)
-        {
-            // Yaw rate affects heading
-            prediction.Heading += currentData.Rudder * 10 * predictionTimeSec;
-            // Normalize heading
-            prediction.Heading = (prediction.Heading + 360) % 360;
-        }
+        // Do NOT predict angular rates - too likely to cause oscillation
         
         return prediction;
     }
@@ -447,7 +431,8 @@ public class CockpitHub : Hub
     // Track last send time per connection to enable throttling
     private static readonly Dictionary<string, long> _lastSendTime = new();
     // Minimum time between position updates (ms)
-    private const int MIN_UPDATE_INTERVAL = 30; // ~30-33 fps is sufficient for smooth animation
+    private const int MIN_UPDATE_INTERVAL = 50; // Changed from 30 to 50ms (~20fps) for more stability
+    private const int RAPID_UPDATE_INTERVAL = 33; // ~30fps for turns/rapid changes
 
     // Added for adaptive throttling
     private static readonly Dictionary<string, AircraftData> _lastAircraftData = new();
@@ -484,28 +469,20 @@ public class CockpitHub : Hub
     {
         if (_sessionControlMap.TryGetValue(sessionCode, out string controlId) && controlId == Context.ConnectionId)
         {
-            // Apply adaptive throttling - send more frequently during rapid changes
+            // Apply simpler, more stable throttling
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             
             // Check if we have previous data to compare
             if (_lastAircraftData.TryGetValue(Context.ConnectionId, out AircraftData prevData))
             {
-                // Calculate rate of change for heading, pitch, and bank (most noticeable for smoothness)
+                // Only calculate heading change - the most important for visual smoothness
                 double headingChange = Math.Abs(data.Heading - prevData.Heading);
                 if (headingChange > 180) headingChange = 360 - headingChange; // Handle 359->0 wraparound
                 
-                double pitchChange = Math.Abs(data.Pitch - prevData.Pitch);
-                double bankChange = Math.Abs(data.Bank - prevData.Bank);
+                // Use a simpler fixed-interval approach based on turning vs straight flight
+                int updateInterval = headingChange > 0.5 ? RAPID_UPDATE_INTERVAL : MIN_UPDATE_INTERVAL;
                 
-                // Adaptive interval based on rate of change (faster updates during rapid changes)
-                int adaptiveInterval = MIN_UPDATE_INTERVAL;
-                double totalChange = headingChange + pitchChange + bankChange;
-                
-                // Less throttling during rapid changes
-                if (totalChange > 5.0)
-                    adaptiveInterval = Math.Max(15, MIN_UPDATE_INTERVAL - 10); // Minimum 15ms (~66fps)
-                
-                if (!_lastSendTime.TryGetValue(Context.ConnectionId, out long lastSend) || (now - lastSend) >= adaptiveInterval)
+                if (!_lastSendTime.TryGetValue(Context.ConnectionId, out long lastSend) || (now - lastSend) >= updateInterval)
                 {
                     // Set timestamp on server to ensure accuracy
                     data.Timestamp = now;
@@ -513,8 +490,8 @@ public class CockpitHub : Hub
                     _lastSendTime[Context.ConnectionId] = now;
                     _lastAircraftData[Context.ConnectionId] = data; // Store for next comparison
                     
-                    // Reduce logging for performance - log at debug level only
-                    _logger.LogDebug("Received data in session {SessionCode}: Alt={Alt:F1}", sessionCode, data.Altitude);
+                    // Reduce logging for performance
+                    _logger.LogDebug("Sent data in session {SessionCode}", sessionCode);
                     
                     await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
                 }
