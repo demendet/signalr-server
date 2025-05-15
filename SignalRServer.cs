@@ -109,12 +109,20 @@ public class FlightInterpolation
     private AircraftData _currentData;
     
     // Jitter buffer system
-    private long _renderDelayMs = 50; // Small delay to allow for better smoothing (50ms buffer)
+    private long _renderDelayMs = 10; // Find a better balance between responsiveness and smoothness (was 50ms)
     private long _lastUpdateTime;
     
-    // Smoothing factors
-    private const float ROTATION_SMOOTHING = 0.92f;  // Very aggressive rotation smoothing (0-1)
-    private const float POSITION_SMOOTHING = 0.82f;  // Strong position smoothing (0-1)
+    // Smoothing factors - make rotation smoothing far more responsive while still filtering jitter
+    private const float ROTATION_SMOOTHING = 0.65f;  // Reduce rotation smoothing for responsiveness (was 0.92)
+    private const float POSITION_SMOOTHING = 0.6f;  // Reduce position smoothing for better responsiveness (was 0.82)
+    
+    // Add specific smoothing for rates of change
+    private double _lastPitch = 0;
+    private double _lastBank = 0;
+    private double _lastHeading = 0;
+    private double _pitchRate = 0;
+    private double _bankRate = 0;
+    private double _headingRate = 0;
     
     // Cached smoothed values
     private double _smoothedPitch = 0;
@@ -227,6 +235,38 @@ public class FlightInterpolation
         _smoothedPitch = AngleExponentialSmooth(_smoothedPitch, interpolatedPitch, ROTATION_SMOOTHING);
         _smoothedBank = AngleExponentialSmooth(_smoothedBank, interpolatedBank, ROTATION_SMOOTHING);
         _smoothedHeading = AngleExponentialSmooth(_smoothedHeading, interpolatedHeading, ROTATION_SMOOTHING);
+        
+        // Calculate and smooth rates of change for rotations - critical for turns and climbs
+        long timeSinceLastUpdate = currentTime - _lastUpdateTime;
+        if (timeSinceLastUpdate > 0)
+        {
+            // Calculate current rates in degrees per second
+            double currentPitchRate = NormalizeAngleDifference(_smoothedPitch - _lastPitch) * 1000.0 / timeSinceLastUpdate;
+            double currentBankRate = NormalizeAngleDifference(_smoothedBank - _lastBank) * 1000.0 / timeSinceLastUpdate;
+            double currentHeadingRate = NormalizeAngleDifference(_smoothedHeading - _lastHeading) * 1000.0 / timeSinceLastUpdate;
+            
+            // Apply heavy smoothing to the rates themselves to eliminate rate jitter (cause of micro-stutters)
+            _pitchRate = _pitchRate * 0.85 + currentPitchRate * 0.15;
+            _bankRate = _bankRate * 0.85 + currentBankRate * 0.15;
+            _headingRate = _headingRate * 0.85 + currentHeadingRate * 0.15;
+            
+            // Store current values for next update
+            _lastPitch = _smoothedPitch;
+            _lastBank = _smoothedBank;
+            _lastHeading = _smoothedHeading;
+            
+            // Apply tiny rate-based prediction to eliminate micro-stutters in fast rotations
+            // Critical for turns and rapid climbs/descents
+            double ratePredictionTimeMs = 8.0; // Very small rate-based look-ahead (milliseconds)
+            _smoothedPitch += _pitchRate * ratePredictionTimeMs / 1000.0;
+            _smoothedBank += _bankRate * ratePredictionTimeMs / 1000.0;
+            _smoothedHeading += _headingRate * ratePredictionTimeMs / 1000.0;
+            
+            // Normalize angles after adjustment
+            _smoothedPitch = (_smoothedPitch % 360 + 360) % 360;
+            _smoothedBank = (_smoothedBank % 360 + 360) % 360;
+            _smoothedHeading = (_smoothedHeading % 360 + 360) % 360;
+        }
         
         // Create interpolated data
         var result = new AircraftData
@@ -461,6 +501,14 @@ public class FlightInterpolation
         
         return (a + diff * t + 360) % 360;
     }
+
+    // Add this helper method to normalize angle differences
+    private double NormalizeAngleDifference(double angleDiff)
+    {
+        // Normalize to -180 to +180 range for rate calculations
+        angleDiff = (angleDiff + 180) % 360 - 180;
+        return angleDiff;
+    }
 }
 
 // To use the interpolation in the client side of your app:
@@ -549,7 +597,7 @@ public class CockpitHub : Hub
     // Track last send time per connection to enable throttling
     private static readonly Dictionary<string, long> _lastSendTime = new();
     // Minimum time between position updates (ms)
-    private const int MIN_UPDATE_INTERVAL = 33; // ~30 fps is sufficient for smooth animation
+    private const int MIN_UPDATE_INTERVAL = 25; // Increase update rate to reduce micro-stutters (was 33ms)
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
