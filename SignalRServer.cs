@@ -270,15 +270,15 @@ public class FlightInterpolation
         if (sinTheta < 0.001)
         {
             // Linear interpolation when angles are very close
-            double s0 = 1.0 - adjustedT;
-            double s1 = adjustedT;
+            double s0Linear = 1.0 - adjustedT;
+            double s1Linear = adjustedT;
             
-            double newSin = sinA * s0 + sinB * s1;
-            double newCos = cosA * s0 + cosB * s1;
+            double newSinLinear = sinA * s0Linear + sinB * s1Linear;
+            double newCosLinear = cosA * s0Linear + cosB * s1Linear;
             
             // Convert back to angle
-            double resultAngle = 2.0 * Math.Atan2(newSin, newCos);
-            return resultAngle * 180.0 / Math.PI;
+            double resultAngleLinear = 2.0 * Math.Atan2(newSinLinear, newCosLinear);
+            return resultAngleLinear * 180.0 / Math.PI;
         }
         
         // Proper spherical linear interpolation formula
