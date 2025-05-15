@@ -158,8 +158,8 @@ public class FlightInterpolation
         
         // For stability in fast turns, add a small amount of prediction based on velocity
         // This helps smooth out rapid changes when packets are delayed
-        bool useExtrapolation = factor >= 0.85f; // Only predict when we're close to needing a new packet
-        float predictFactor = useExtrapolation ? (factor - 0.85f) * 2.0f : 0f; // Scale from 0-0.3
+        bool useExtrapolation = factor >= 0.9f; // Only predict when we're close to needing a new packet (was 0.85)
+        float predictFactor = useExtrapolation ? (factor - 0.9f) * 1.0f : 0f; // Scale from 0-0.1 (was 0-0.3)
         
         // Create interpolated data
         var result = new AircraftData
@@ -174,7 +174,7 @@ public class FlightInterpolation
             Altitude = Lerp(_previousData.Altitude, _currentData.Altitude, factor) + 
                       (useExtrapolation ? predictFactor * (_currentData.Altitude - _previousData.Altitude) : 0),
             
-            // Spherical interpolation for rotational data
+            // Spherical interpolation for rotational data - with no extrapolation on rotations for stability
             Pitch = SLerp(_previousData.Pitch, _currentData.Pitch, factor),
             Bank = SLerp(_previousData.Bank, _currentData.Bank, factor),
             Heading = AngleLerp(_previousData.Heading, _currentData.Heading, factor),
@@ -194,26 +194,27 @@ public class FlightInterpolation
             Flaps = _currentData.Flaps,
             Gear = _currentData.Gear,
             
-            // Calculated velocities using interpolation with prediction for smoother changes
+            // Calculated velocities using interpolation with minimal prediction for smoother changes
+            // Velocity data is especially sensitive - too much extrapolation causes jerky movement
             GroundSpeed = Lerp(_previousData.GroundSpeed, _currentData.GroundSpeed, factor) + 
-                         (useExtrapolation ? predictFactor * (_currentData.GroundSpeed - _previousData.GroundSpeed) : 0),
+                         (useExtrapolation ? predictFactor * 0.5 * (_currentData.GroundSpeed - _previousData.GroundSpeed) : 0),
             VerticalSpeed = Lerp(_previousData.VerticalSpeed, _currentData.VerticalSpeed, factor) + 
-                           (useExtrapolation ? predictFactor * (_currentData.VerticalSpeed - _previousData.VerticalSpeed) : 0),
+                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VerticalSpeed - _previousData.VerticalSpeed) : 0),
             AirspeedTrue = Lerp(_previousData.AirspeedTrue, _currentData.AirspeedTrue, factor) + 
-                          (useExtrapolation ? predictFactor * (_currentData.AirspeedTrue - _previousData.AirspeedTrue) : 0),
+                          (useExtrapolation ? predictFactor * 0.5 * (_currentData.AirspeedTrue - _previousData.AirspeedTrue) : 0),
             AirspeedIndicated = Lerp(_previousData.AirspeedIndicated, _currentData.AirspeedIndicated, factor) + 
-                               (useExtrapolation ? predictFactor * (_currentData.AirspeedIndicated - _previousData.AirspeedIndicated) : 0),
+                               (useExtrapolation ? predictFactor * 0.5 * (_currentData.AirspeedIndicated - _previousData.AirspeedIndicated) : 0),
             
             // Other non-interpolated state data
             OnGround = _currentData.OnGround,
             
-            // Velocity interpolation with prediction for smooth transitions
+            // Velocity interpolation with reduced prediction (50%) for smoother transitions
             VelocityBodyX = Lerp(_previousData.VelocityBodyX, _currentData.VelocityBodyX, factor) + 
-                           (useExtrapolation ? predictFactor * (_currentData.VelocityBodyX - _previousData.VelocityBodyX) : 0),
+                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VelocityBodyX - _previousData.VelocityBodyX) : 0),
             VelocityBodyY = Lerp(_previousData.VelocityBodyY, _currentData.VelocityBodyY, factor) + 
-                           (useExtrapolation ? predictFactor * (_currentData.VelocityBodyY - _previousData.VelocityBodyY) : 0),
+                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VelocityBodyY - _previousData.VelocityBodyY) : 0),
             VelocityBodyZ = Lerp(_previousData.VelocityBodyZ, _currentData.VelocityBodyZ, factor) + 
-                           (useExtrapolation ? predictFactor * (_currentData.VelocityBodyZ - _previousData.VelocityBodyZ) : 0),
+                           (useExtrapolation ? predictFactor * 0.5 * (_currentData.VelocityBodyZ - _previousData.VelocityBodyZ) : 0),
             
             // Light states - don't interpolate these
             LightBeacon = _currentData.LightBeacon,
@@ -240,28 +241,77 @@ public class FlightInterpolation
         double angleA = a * Math.PI / 180.0;
         double angleB = b * Math.PI / 180.0;
         
-        // Handle special case for Pitch/Bank/Heading
-        // Use full quaternion rotation for better handling of rapid changes
-        Quaternion qA = Quaternion.CreateFromYawPitchRoll((float)angleA, 0, 0);
-        Quaternion qB = Quaternion.CreateFromYawPitchRoll((float)angleB, 0, 0);
+        // For rotational data, we need to be careful about transitions
+        // Use quaternions for smoother rotation interpolation
+        double sinA = Math.Sin(angleA / 2.0);
+        double cosA = Math.Cos(angleA / 2.0);
+        double sinB = Math.Sin(angleB / 2.0);
+        double cosB = Math.Cos(angleB / 2.0);
         
-        // Use slerp with a small bias toward newer values for more responsive feel
-        float adjustedT = 0.5f + (t * 0.5f); // Bias toward newer values
-        Quaternion result = Quaternion.Slerp(qA, qB, adjustedT);
+        // Compute dot product to determine shortest path
+        double dot = sinA * sinB + cosA * cosB;
+        
+        // Ensure we take the shortest path
+        if (dot < 0)
+        {
+            sinB = -sinB;
+            cosB = -cosB;
+            dot = -dot;
+        }
+        
+        // Use less bias toward newer values for more stable rotation
+        float adjustedT = 0.3f + (t * 0.7f); // Was 0.5 + (t * 0.5), which biased too much toward newer values
+        
+        // Calculate interpolation parameters
+        double theta = Math.Acos(dot);
+        double sinTheta = Math.Sin(theta);
+        
+        // Handle edge cases to avoid division by zero
+        if (sinTheta < 0.001)
+        {
+            // Linear interpolation when angles are very close
+            double s0 = 1.0 - adjustedT;
+            double s1 = adjustedT;
+            
+            double newSin = sinA * s0 + sinB * s1;
+            double newCos = cosA * s0 + cosB * s1;
+            
+            // Convert back to angle
+            double resultAngle = 2.0 * Math.Atan2(newSin, newCos);
+            return resultAngle * 180.0 / Math.PI;
+        }
+        
+        // Proper spherical linear interpolation formula
+        double s0 = Math.Sin((1.0 - adjustedT) * theta) / sinTheta;
+        double s1 = Math.Sin(adjustedT * theta) / sinTheta;
+        
+        double newSin = sinA * s0 + sinB * s1;
+        double newCos = cosA * s0 + cosB * s1;
         
         // Convert back to angle
-        double slerpedAngle = Math.Atan2(2.0 * (result.W * result.Z + result.X * result.Y), 
-                                        1.0 - 2.0 * (result.Y * result.Y + result.Z * result.Z));
-        
-        // Return in degrees
-        return slerpedAngle * 180.0 / Math.PI;
+        double resultAngle = 2.0 * Math.Atan2(newSin, newCos);
+        return resultAngle * 180.0 / Math.PI;
     }
     
     // Special interpolation for angles that handles wrap-around (0-360)
     private double AngleLerp(double a, double b, float t)
     {
+        // Normalize angles to 0-360 range
+        a = (a % 360 + 360) % 360;
+        b = (b % 360 + 360) % 360;
+        
         // Find the shortest path
         double diff = ((b - a + 540) % 360) - 180;
+        
+        // Smooth out very rapid heading changes (greater than 120 degrees)
+        if (Math.Abs(diff) > 120)
+        {
+            // Use a more gradual interpolation for extreme changes 
+            // to avoid spinning aircraft too quickly
+            float adjustedT = t * t * (3 - 2 * t); // Smooth step interpolation
+            return (a + diff * adjustedT + 360) % 360;
+        }
+        
         return (a + diff * t + 360) % 360;
     }
 }
@@ -352,7 +402,7 @@ public class CockpitHub : Hub
     // Track last send time per connection to enable throttling
     private static readonly Dictionary<string, long> _lastSendTime = new();
     // Minimum time between position updates (ms)
-    private const int MIN_UPDATE_INTERVAL = 60; // ~30-33 fps is sufficient for smooth animation
+    private const int MIN_UPDATE_INTERVAL = 33; // ~30 fps is sufficient for smooth animation
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
