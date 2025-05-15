@@ -11,14 +11,32 @@ var builder = WebApplication.CreateBuilder(args);
 // Add console logging
 builder.Logging.AddConsole();
 
-// Add SignalR services with increased buffer size for smoother data flow
+// Configure CORS properly
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("CorsPolicy", policy =>
+    {
+        policy.WithOrigins("*") // Replace with your actual client origins in production
+              .AllowAnyMethod()
+              .AllowAnyHeader()
+              .WithExposedHeaders("Content-Disposition");
+    });
+});
+
+// Add SignalR services with increased buffer size
 builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 102400; // 100KB
-    options.StreamBufferCapacity = 20; // Increase buffer capacity
+    options.StreamBufferCapacity = 20;
+    options.EnableDetailedErrors = true; // Helpful for debugging
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
 });
 
 var app = builder.Build();
+
+// Use CORS before routing
+app.UseCors("CorsPolicy");
 
 // Map the hub
 app.MapHub<CockpitHub>("/sharedcockpithub");
