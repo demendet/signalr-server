@@ -32,12 +32,10 @@ builder.Services.AddCors(options =>
 builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 102400; // 100KB
-    options.StreamBufferCapacity = 30; // Reduced from 50 to decrease memory usage
+    options.StreamBufferCapacity = 50; // Increased from 20
     options.EnableDetailedErrors = true; // Helpful for debugging
-    options.KeepAliveInterval = TimeSpan.FromSeconds(5); // Increased from 2 to 5 seconds for less network overhead
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(15); // Increased for more stability
-    options.HandshakeTimeout = TimeSpan.FromSeconds(10); // Increased for more reliable connections
-    options.MaximumParallelInvocationsPerClient = 1; // Ensure ordered delivery
+    options.KeepAliveInterval = TimeSpan.FromSeconds(5); // Reduced for better responsiveness
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(15); // Reduced for faster timeout detection
 }).AddJsonProtocol(options => {
     // Minimize JSON size
     options.PayloadSerializerOptions.IgnoreNullValues = true;
@@ -158,21 +156,6 @@ public class FlightInterpolation
         // Calculate interpolation factor (0.0 to 1.0)
         float factor = Math.Clamp((float)(currentTime - _previousData.Timestamp) / timeDiff, 0.0f, 1.0f);
         
-        // If the current time is past the last received update, use a small amount of prediction
-        bool usePrediction = factor >= 1.0f;
-        if (usePrediction)
-        {
-            // Calculate how far past the last update we are (maximum 100ms prediction)
-            long predictionTime = Math.Min(currentTime - _currentData.Timestamp, 100);
-            
-            // Use velocity information for more accurate prediction
-            // Create a new prediction based on extrapolating from the current point
-            AircraftData prediction = CreatePrediction(_currentData, predictionTime, usePrediction);
-            return prediction;
-        }
-        
-        // Otherwise use normal interpolation with some rate-aware smoothing
-        
         // Create interpolated data
         var result = new AircraftData
         {
@@ -262,87 +245,6 @@ public class FlightInterpolation
         double diff = ((b - a + 540) % 360) - 180;
         return (a + diff * t + 360) % 360;
     }
-
-    // Create a prediction based on current position and velocities
-    private AircraftData CreatePrediction(AircraftData currentData, long predictionTimeMs, bool fullPrediction)
-    {
-        // For stability, limit prediction time 
-        predictionTimeMs = Math.Min(predictionTimeMs, 50); // Max 50ms prediction to prevent overshooting
-        
-        // Convert prediction time to seconds for physical calculations
-        float predictionTimeSec = predictionTimeMs / 1000.0f;
-        
-        // Create a copy of the current data
-        var prediction = new AircraftData
-        {
-            Timestamp = currentData.Timestamp + predictionTimeMs,
-            
-            // Copy all properties initially
-            Latitude = currentData.Latitude,
-            Longitude = currentData.Longitude,
-            Altitude = currentData.Altitude,
-            Pitch = currentData.Pitch,
-            Bank = currentData.Bank,
-            Heading = currentData.Heading,
-            Throttle = currentData.Throttle,
-            Aileron = currentData.Aileron,
-            Elevator = currentData.Elevator,
-            Rudder = currentData.Rudder,
-            BrakeLeft = currentData.BrakeLeft,
-            BrakeRight = currentData.BrakeRight,
-            ParkingBrake = currentData.ParkingBrake,
-            Mixture = currentData.Mixture,
-            Flaps = currentData.Flaps,
-            Gear = currentData.Gear,
-            GroundSpeed = currentData.GroundSpeed,
-            VerticalSpeed = currentData.VerticalSpeed,
-            AirspeedTrue = currentData.AirspeedTrue,
-            AirspeedIndicated = currentData.AirspeedIndicated,
-            OnGround = currentData.OnGround,
-            VelocityBodyX = currentData.VelocityBodyX,
-            VelocityBodyY = currentData.VelocityBodyY,
-            VelocityBodyZ = currentData.VelocityBodyZ,
-            ElevatorTrimPosition = currentData.ElevatorTrimPosition,
-            LightBeacon = currentData.LightBeacon,
-            LightLanding = currentData.LightLanding,
-            LightTaxi = currentData.LightTaxi,
-            LightNav = currentData.LightNav,
-            LightStrobe = currentData.LightStrobe,
-            PitotHeat = currentData.PitotHeat
-        };
-        
-        if (!fullPrediction)
-            return prediction;
-        
-        // Simplified prediction - only update position based on velocity
-        // Avoid predicting rotations which can cause oscillations
-        
-        // Update altitude based on vertical speed
-        prediction.Altitude += currentData.VerticalSpeed * predictionTimeSec;
-        
-        // Update position based on ground speed and heading
-        // Convert heading to radians for trig functions
-        double headingRad = currentData.Heading * Math.PI / 180.0;
-        
-        // Calculate velocity components
-        double eastVelocity = currentData.GroundSpeed * Math.Sin(headingRad);
-        double northVelocity = currentData.GroundSpeed * Math.Cos(headingRad);
-        
-        // Earth's radius in meters
-        const double earthRadius = 6371000.0;
-        
-        // Convert velocities to changes in latitude/longitude
-        // This is a simplified calculation that works for short time periods
-        double latChange = (northVelocity * predictionTimeSec) / earthRadius * (180.0 / Math.PI);
-        double lonChange = (eastVelocity * predictionTimeSec) / (earthRadius * Math.Cos(prediction.Latitude * Math.PI / 180.0)) * (180.0 / Math.PI);
-        
-        prediction.Latitude += latChange;
-        prediction.Longitude += lonChange;
-        
-        // Do NOT predict angular rates - too likely to cause oscillation
-        
-        return prediction;
-    }
 }
 
 // To use the interpolation in the client side of your app:
@@ -431,11 +333,7 @@ public class CockpitHub : Hub
     // Track last send time per connection to enable throttling
     private static readonly Dictionary<string, long> _lastSendTime = new();
     // Minimum time between position updates (ms)
-    private const int MIN_UPDATE_INTERVAL = 50; // Changed from 30 to 50ms (~20fps) for more stability
-    private const int RAPID_UPDATE_INTERVAL = 33; // ~30fps for turns/rapid changes
-
-    // Added for adaptive throttling
-    private static readonly Dictionary<string, AircraftData> _lastAircraftData = new();
+    private const int MIN_UPDATE_INTERVAL = 30; // ~30-33 fps is sufficient for smooth animation
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
@@ -469,39 +367,18 @@ public class CockpitHub : Hub
     {
         if (_sessionControlMap.TryGetValue(sessionCode, out string controlId) && controlId == Context.ConnectionId)
         {
-            // Apply simpler, more stable throttling
+            // Apply throttling to avoid network congestion
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             
-            // Check if we have previous data to compare
-            if (_lastAircraftData.TryGetValue(Context.ConnectionId, out AircraftData prevData))
+            if (!_lastSendTime.TryGetValue(Context.ConnectionId, out long lastSend) || (now - lastSend) >= MIN_UPDATE_INTERVAL)
             {
-                // Only calculate heading change - the most important for visual smoothness
-                double headingChange = Math.Abs(data.Heading - prevData.Heading);
-                if (headingChange > 180) headingChange = 360 - headingChange; // Handle 359->0 wraparound
-                
-                // Use a simpler fixed-interval approach based on turning vs straight flight
-                int updateInterval = headingChange > 0.5 ? RAPID_UPDATE_INTERVAL : MIN_UPDATE_INTERVAL;
-                
-                if (!_lastSendTime.TryGetValue(Context.ConnectionId, out long lastSend) || (now - lastSend) >= updateInterval)
-                {
-                    // Set timestamp on server to ensure accuracy
-                    data.Timestamp = now;
-                    
-                    _lastSendTime[Context.ConnectionId] = now;
-                    _lastAircraftData[Context.ConnectionId] = data; // Store for next comparison
-                    
-                    // Reduce logging for performance
-                    _logger.LogDebug("Sent data in session {SessionCode}", sessionCode);
-                    
-                    await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
-                }
-            }
-            else
-            {
-                // First data packet, just send it immediately
+                // Set timestamp on server to ensure accuracy
                 data.Timestamp = now;
+                
                 _lastSendTime[Context.ConnectionId] = now;
-                _lastAircraftData[Context.ConnectionId] = data;
+                
+                // Reduce logging for performance - log at debug level only
+                _logger.LogDebug("Received data in session {SessionCode}: Alt={Alt:F1}", sessionCode, data.Altitude);
                 
                 await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
             }
