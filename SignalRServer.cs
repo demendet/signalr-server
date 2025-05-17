@@ -26,11 +26,13 @@ builder.Services.AddCors(options =>
 // Add SignalR services with increased buffer size
 builder.Services.AddSignalR(options =>
 {
-    options.MaximumReceiveMessageSize = 102400; // 100KB
-    options.StreamBufferCapacity = 20;
-    options.EnableDetailedErrors = true; // Helpful for debugging
-    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+    options.MaximumReceiveMessageSize = 1024000; // Increased to 1MB
+    options.StreamBufferCapacity = 100; // Increased buffer capacity
+    options.EnableDetailedErrors = true;
+    options.KeepAliveInterval = TimeSpan.FromSeconds(5); // Reduced keep-alive interval
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(10); // Reduced timeout
+    options.HandshakeTimeout = TimeSpan.FromSeconds(5); // Added handshake timeout
+    options.MaximumParallelInvocationsPerClient = 1; // Added to prevent message queuing
 });
 
 var app = builder.Build();
@@ -187,8 +189,12 @@ public class CockpitHub : Hub
     {
         if (_sessionControlMap.TryGetValue(sessionCode, out string controlId) && controlId == Context.ConnectionId)
         {
+            var startTime = DateTime.UtcNow;
             _logger.LogInformation("Received data in session {SessionCode}: Alt={Alt:F1}", sessionCode, data.Altitude);
             await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+            var endTime = DateTime.UtcNow;
+            var deliveryTime = (endTime - startTime).TotalMilliseconds;
+            _logger.LogInformation("Message delivery time: {DeliveryTime}ms", deliveryTime);
         }
     }
     
