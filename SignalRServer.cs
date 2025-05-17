@@ -164,7 +164,9 @@ public class CockpitHub : Hub
 
     public async Task JoinSession(string sessionCode)
     {
-        _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", Context.ConnectionId, sessionCode);
+        var startTime = DateTime.UtcNow;
+        _logger.LogInformation("[CONNECTION] {ConnectionId} joining session {SessionCode}", Context.ConnectionId, sessionCode);
+        
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
         
         if (!_sessionConnections.ContainsKey(sessionCode))
@@ -175,14 +177,18 @@ public class CockpitHub : Hub
         {
             _sessionControlMap[sessionCode] = Context.ConnectionId;
             await Clients.Caller.SendAsync("ControlStatusChanged", true);
-            _logger.LogInformation("Initial control assigned to {ControlId} in session {SessionCode}", Context.ConnectionId, sessionCode);
+            _logger.LogInformation("[PILOT-FLYING] Initial control assigned to {ControlId} in session {SessionCode}", Context.ConnectionId, sessionCode);
         }
         else
         {
             bool hasControl = _sessionControlMap[sessionCode] == Context.ConnectionId;
             await Clients.Caller.SendAsync("ControlStatusChanged", hasControl);
-            _logger.LogInformation("Notified joining client {ClientId} of control status ({HasControl}) in session {SessionCode}", Context.ConnectionId, hasControl, sessionCode);
+            _logger.LogInformation("[PILOT-MONITORING] Client {ClientId} joined with control status: {HasControl}", Context.ConnectionId, hasControl);
         }
+
+        var endTime = DateTime.UtcNow;
+        var joinTime = (endTime - startTime).TotalMilliseconds;
+        _logger.LogInformation("[CONNECTION] Session join completed in {JoinTime}ms", joinTime);
     }
     
     public async Task SendAircraftData(string sessionCode, AircraftData data)
@@ -190,11 +196,14 @@ public class CockpitHub : Hub
         if (_sessionControlMap.TryGetValue(sessionCode, out string controlId) && controlId == Context.ConnectionId)
         {
             var startTime = DateTime.UtcNow;
-            _logger.LogInformation("Received data in session {SessionCode}: Alt={Alt:F1}", sessionCode, data.Altitude);
+            _logger.LogInformation("[PILOT-FLYING] Sending aircraft data - Alt: {Alt:F1}, Lat: {Lat:F6}, Lon: {Lon:F6}, Heading: {Heading:F1}", 
+                data.Altitude, data.Latitude, data.Longitude, data.Heading);
+            
             await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+            
             var endTime = DateTime.UtcNow;
             var deliveryTime = (endTime - startTime).TotalMilliseconds;
-            _logger.LogInformation("Message delivery time: {DeliveryTime}ms", deliveryTime);
+            _logger.LogInformation("[PILOT-FLYING] Message delivery time: {DeliveryTime}ms", deliveryTime);
         }
     }
     
@@ -307,6 +316,9 @@ public class CockpitHub : Hub
     
     public override async Task OnDisconnectedAsync(Exception exception)
     {
+        var startTime = DateTime.UtcNow;
+        _logger.LogInformation("[CONNECTION] Client {ConnectionId} disconnecting", Context.ConnectionId);
+        
         var sessions = _sessionConnections.Where(kvp => kvp.Value.Contains(Context.ConnectionId))
                                            .Select(kvp => kvp.Key)
                                            .ToList();
@@ -320,13 +332,13 @@ public class CockpitHub : Hub
                     var newController = _sessionConnections[session].First();
                     _sessionControlMap[session] = newController;
                     await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
-                    _logger.LogInformation("Control automatically transferred to {NewId} in session {SessionCode}", newController, session);
+                    _logger.LogInformation("[CONTROL] Control transferred to {NewId} in session {SessionCode}", newController, session);
                 }
                 else
                 {
                     _sessionControlMap.Remove(session);
                     _sessionConnections.Remove(session);
-                    _logger.LogInformation("Session {SessionCode} removed as all clients disconnected", session);
+                    _logger.LogInformation("[SESSION] Session {SessionCode} removed - all clients disconnected", session);
                 }
             }
             if (!_sessionConnections[session].Any())
@@ -335,6 +347,10 @@ public class CockpitHub : Hub
                 _sessionControlMap.Remove(session);
             }
         }
+        
+        var endTime = DateTime.UtcNow;
+        var disconnectTime = (endTime - startTime).TotalMilliseconds;
+        _logger.LogInformation("[CONNECTION] Disconnect completed in {DisconnectTime}ms", disconnectTime);
         
         await base.OnDisconnectedAsync(exception);
     }
