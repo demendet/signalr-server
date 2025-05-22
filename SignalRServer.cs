@@ -41,7 +41,6 @@ public class AircraftData
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
-    // Physics properties
     public double GroundSpeed { get; set; }
     public double VerticalSpeed { get; set; }
     public double AirspeedTrue { get; set; }
@@ -70,7 +69,8 @@ public class CockpitHub : Hub
 
     public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
-        // Only log essential info to avoid console spam
+        // Only log essential info to avoid console spamsasfasfasfsa
+        // saheh
         _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
             sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
             
