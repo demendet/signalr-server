@@ -22,15 +22,23 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// Enhanced AircraftData class with physics properties
+// Enhanced AircraftData class with physics properties and timestamp
 public class AircraftData
 {
+    // Timestamp in UTC ticks for precise synchronization
+    public long Timestamp { get; set; }
+    
+    // Aircraft position
     public double Latitude { get; set; }
     public double Longitude { get; set; }
     public double Altitude { get; set; }
+    
+    // Aircraft attitude
     public double Pitch { get; set; }
     public double Bank { get; set; }
     public double Heading { get; set; }
+    
+    // Aircraft controls
     public double Throttle { get; set; }
     public double Aileron { get; set; }
     public double Elevator { get; set; }
@@ -41,15 +49,16 @@ public class AircraftData
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
+    
     // Physics properties
     public double GroundSpeed { get; set; }
     public double VerticalSpeed { get; set; }
     public double AirspeedTrue { get; set; }
     public double AirspeedIndicated { get; set; }
-    public double OnGround { get; set; }
     public double VelocityBodyX { get; set; }
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
+    public double OnGround { get; set; }
 }
 
 // The SignalR hub
@@ -70,10 +79,17 @@ public class CockpitHub : Hub
 
     public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
+        // Ensure the data has a timestamp
+        if (data.Timestamp == 0)
+        {
+            data.Timestamp = DateTime.UtcNow.Ticks;
+        }
+        
         // Only log essential info to avoid console spam
-        _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
-            sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
+        _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}, Timestamp={Timestamp}", 
+            sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated, data.Timestamp);
             
+        // Send the data to all clients in the session group
         await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
     }
 }
