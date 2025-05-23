@@ -126,27 +126,31 @@ public class CockpitHub : Hub
             Context.ConnectionId, hasControl, sessionCode);
     }
 
-    public async Task SendAircraftData(string sessionCode, AircraftData data)
+public async Task SendAircraftData(string sessionCode, AircraftData data)
+{
+    // Add this line to log the received data object as JSON
+    _logger.LogInformation("Received raw data for session {SessionCode}: {DataJson}",
+        sessionCode, System.Text.Json.JsonSerializer.Serialize(data));
+
+    bool isController;
+    lock (_lockObject)
     {
-        bool isController;
-        lock (_lockObject)
-        {
-            isController = _sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId;
-        }
-        
-        if (isController)
-        {
-            _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
-                sessionCode, data.Altitude, data.GroundSpeed);
-                
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
-        }
-        else
-        {
-            _logger.LogWarning("Rejected data from non-controller {ConnectionId} in session {SessionCode}", 
-                Context.ConnectionId, sessionCode);
-        }
+        isController = _sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId;
     }
+
+    if (isController)
+    {
+        _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}",
+            sessionCode, data.Altitude, data.GroundSpeed);
+
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+    }
+    else
+    {
+        _logger.LogWarning("Rejected data from non-controller {ConnectionId} in session {SessionCode}",
+            Context.ConnectionId, sessionCode);
+    }
+}
     
     public async Task SendLightStates(string sessionCode, LightStatesDto lights)
     {
