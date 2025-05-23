@@ -5,7 +5,6 @@ using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
-using Microsoft.AspNetCore.ResponseCompression;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,33 +13,9 @@ builder.Logging.AddConsole();
 builder.Services.AddSignalR(options => {
     options.MaximumReceiveMessageSize = 102400;
     options.StreamBufferCapacity = 20;
-    options.EnableDetailedErrors = false;
-    options.HandshakeTimeout = TimeSpan.FromSeconds(5);
-    options.KeepAliveInterval = TimeSpan.FromSeconds(5);
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(10);
-    options.MaximumParallelInvocationsPerClient = 1;
-});
-
-builder.Services.AddResponseCompression(options =>
-{
-    options.EnableForHttps = true;
-    options.Providers.Add<BrotliCompressionProvider>();
-    options.Providers.Add<GzipCompressionProvider>();
-});
-
-builder.Services.Configure<BrotliCompressionProviderOptions>(options =>
-{
-    options.Level = System.IO.Compression.CompressionLevel.Fastest;
-});
-
-builder.Services.Configure<GzipCompressionProviderOptions>(options =>
-{
-    options.Level = System.IO.Compression.CompressionLevel.Fastest;
 });
 
 var app = builder.Build();
-
-app.UseResponseCompression();
 
 app.MapHub<CockpitHub>("/sharedcockpithub");
 
@@ -96,8 +71,6 @@ public class CockpitHub : Hub
     private static readonly Dictionary<string, string> _sessionControlMap = new();
     private static readonly Dictionary<string, List<string>> _sessionConnections = new();
     private static readonly object _lockObject = new object();
-    private static readonly Dictionary<string, DateTime> _lastSendTimes = new();
-    private const int MIN_SEND_INTERVAL_MS = 15;
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
@@ -153,50 +126,31 @@ public class CockpitHub : Hub
             Context.ConnectionId, hasControl, sessionCode);
     }
 
-    public async Task SendAircraftData(string sessionCode, AircraftData data)
+public async Task SendAircraftData(string sessionCode, AircraftData data)
+{
+    // Add this line to log the received data object as JSON
+    _logger.LogInformation("Received raw data for session {SessionCode}: {DataJson}",
+        sessionCode, System.Text.Json.JsonSerializer.Serialize(data));
+
+    bool isController;
+    lock (_lockObject)
     {
-        lock (_lockObject)
-        {
-            if (_lastSendTimes.TryGetValue(Context.ConnectionId, out DateTime lastSend))
-            {
-                var timeSinceLastSend = (DateTime.UtcNow - lastSend).TotalMilliseconds;
-                if (timeSinceLastSend < MIN_SEND_INTERVAL_MS)
-                {
-                    return;
-                }
-            }
-            _lastSendTimes[Context.ConnectionId] = DateTime.UtcNow;
-        }
-
-        bool isController;
-        lock (_lockObject)
-        {
-            isController = _sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId;
-        }
-
-        if (isController)
-        {
-            if (DateTime.UtcNow.Second % 5 == 0)
-            {
-                _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}",
-                    sessionCode, data.Altitude, data.GroundSpeed);
-            }
-
-            try
-            {
-                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error sending aircraft data to clients in session {SessionCode}", sessionCode);
-            }
-        }
-        else
-        {
-            _logger.LogWarning("Rejected data from non-controller {ConnectionId} in session {SessionCode}",
-                Context.ConnectionId, sessionCode);
-        }
+        isController = _sessionControlMap.TryGetValue(sessionCode, out var controlId) && controlId == Context.ConnectionId;
     }
+
+    if (isController)
+    {
+        _logger.LogInformation("Received data from controller in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}",
+            sessionCode, data.Altitude, data.GroundSpeed);
+
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+    }
+    else
+    {
+        _logger.LogWarning("Rejected data from non-controller {ConnectionId} in session {SessionCode}",
+            Context.ConnectionId, sessionCode);
+    }
+}
     
     public async Task SendLightStates(string sessionCode, LightStatesDto lights)
     {
