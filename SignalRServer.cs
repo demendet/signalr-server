@@ -3,33 +3,16 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
-using System.Threading;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add console logging with reduced verbosity
+// Add console logging.
 builder.Logging.AddConsole();
-builder.Logging.SetMinimumLevel(LogLevel.Warning); // Reduce log spam
 
-// Add SignalR services with MAXIMUM buffer sizes and optimizations for ultra-stable connections
+// Add SignalR services with increased buffer size for smoother data flow
 builder.Services.AddSignalR(options => {
-    options.MaximumReceiveMessageSize = 1024000; // 1MB - massive buffer
-    options.StreamBufferCapacity = 50; // Large buffer capacity
-    options.EnableDetailedErrors = false; // Reduce overhead
-    options.KeepAliveInterval = TimeSpan.FromSeconds(5); // Aggressive keepalive
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(15); // Longer timeout
-    options.HandshakeTimeout = TimeSpan.FromSeconds(10); // Longer handshake
-    options.MaximumParallelInvocationsPerClient = 10; // Allow parallel calls
-});
-
-// Configure Kestrel for better performance
-builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions>(options =>
-{
-    options.Limits.MaxConcurrentConnections = 1000;
-    options.Limits.MaxConcurrentUpgradedConnections = 1000;
-    options.Limits.MaxRequestBodySize = 1024000; // 1MB
-    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
-    options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+    options.MaximumReceiveMessageSize = 102400; // 100KB
+    options.StreamBufferCapacity = 20; // Increase buffer capacity
 });
 
 var app = builder.Build();
@@ -78,80 +61,35 @@ public class AircraftData
     public double OnGround { get; set; }
 }
 
-// The SignalR hub - BULLETPROOF
+// The SignalR hub
 public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
-    private static int _messageCount = 0;
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
         _logger = logger;
     }
 
-    public override async Task OnConnectedAsync()
-    {
-        _logger.LogInformation("Client {ConnectionId} connected", Context.ConnectionId);
-        await base.OnConnectedAsync();
-    }
-
-    public override async Task OnDisconnectedAsync(Exception? exception)
-    {
-        if (exception != null)
-        {
-            _logger.LogWarning("Client {ConnectionId} disconnected with error: {Error}", 
-                Context.ConnectionId, exception.Message);
-        }
-        else
-        {
-            _logger.LogInformation("Client {ConnectionId} disconnected normally", Context.ConnectionId);
-        }
-        await base.OnDisconnectedAsync(exception);
-    }
-
     public async Task JoinSession(string sessionCode)
     {
-        try
-        {
-            _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", 
-                Context.ConnectionId, sessionCode);
-            await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error joining session {SessionCode} for connection {ConnectionId}", 
-                sessionCode, Context.ConnectionId);
-            throw;
-        }
+        _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode}", Context.ConnectionId, sessionCode);
+        await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
     }
 
     public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
-        try
+        // Ensure the data has a timestamp
+        if (data.Timestamp == 0)
         {
-            // Ensure the data has a timestamp
-            if (data.Timestamp == 0)
-            {
-                data.Timestamp = DateTime.UtcNow.Ticks;
-            }
-            
-            // Increment message counter
-            Interlocked.Increment(ref _messageCount);
-            
-            // Only log every 100th message to reduce spam but still monitor health
-            if (_messageCount % 100 == 0)
-            {
-                _logger.LogInformation("Processed {MessageCount} messages. Latest from session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}", 
-                    _messageCount, sessionCode, data.Altitude, data.GroundSpeed);
-            }
-                
-            // Send the data to all clients in the session group with error handling
-            await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
+            data.Timestamp = DateTime.UtcNow.Ticks;
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error sending aircraft data for session {SessionCode}", sessionCode);
-            // Don't rethrow - we want to keep the connection alive
-        }
+        
+        // Only log essential info to avoid console spam
+        _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}, Timestamp={Timestamp}", 
+            sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated, data.Timestamp);
+            
+        // Send the data to all clients in the session group
+        await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
     }
 }
