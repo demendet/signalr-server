@@ -28,7 +28,7 @@ app.Run();
 // YourControls SyncData class matching the client implementation
 public class SyncData
 {
-    public Dictionary<string, object> Variables { get; set; } = new();
+    public Dictionary<string, double> Variables { get; set; } = new();
     public bool IsUnreliable { get; set; }
     public long Time { get; set; }
     public string From { get; set; } = "";
