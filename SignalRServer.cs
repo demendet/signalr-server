@@ -50,8 +50,37 @@ public class CockpitHub : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
     }
 
-    // YourControls sync data method
-    public async Task SendSyncData(string sessionCode, SyncData data)
+    // Add the missing TestMessage method
+    public async Task TestMessage(string sessionCode, string message)
+    {
+        _logger.LogInformation("Test message from {ConnectionId} in session {SessionCode}: {Message}", Context.ConnectionId, sessionCode, message);
+        await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("TestMessage", message);
+    }
+
+    // YourControls sync data method - accept Dictionary directly
+    public async Task SendSyncData(string sessionCode, Dictionary<string, double> variables)
+    {
+        // Create SyncData object from the dictionary
+        var data = new SyncData
+        {
+            Variables = variables,
+            Time = DateTime.UtcNow.Ticks,
+            From = Context.ConnectionId,
+            IsUnreliable = false
+        };
+        
+        // Reduced logging to prevent spam
+        if (variables.Count > 0)
+        {
+            _logger.LogDebug("Sync from {ConnectionId}: {VariableCount} vars", Context.ConnectionId, variables.Count);
+        }
+            
+        // Send the dictionary directly to match client expectations
+        await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("ReceiveSyncData", variables);
+    }
+
+    // Keep the original SyncData method for compatibility
+    public async Task SendSyncDataObject(string sessionCode, SyncData data)
     {
         // Ensure the data has a timestamp
         if (data.Time == 0)
@@ -62,15 +91,14 @@ public class CockpitHub : Hub
         // Set the sender
         data.From = Context.ConnectionId;
         
-        // Log sync activity (reduced logging for performance)
+        // Reduced logging to prevent spam
         if (data.Variables.Count > 0)
         {
-            _logger.LogDebug("YourControls sync from {ConnectionId} in session {SessionCode}: {VariableCount} variables, Unreliable={IsUnreliable}", 
-                Context.ConnectionId, sessionCode, data.Variables.Count, data.IsUnreliable);
+            _logger.LogDebug("SyncData from {ConnectionId}: {VariableCount} vars", Context.ConnectionId, data.Variables.Count);
         }
             
         // Send the data to all OTHER clients in the session group (exclude sender)
-        await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("ReceiveSyncData", data);
+        await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("ReceiveSyncData", data.Variables);
     }
 
     public override async Task OnConnectedAsync()
