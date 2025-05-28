@@ -34,46 +34,7 @@ public class SyncData
     public string From { get; set; } = "";
 }
 
-// Legacy AircraftData class for backward compatibility
-public class AircraftData
-{
-    // Timestamp in UTC ticks for precise synchronization
-    public long Timestamp { get; set; }
-    
-    // Aircraft position
-    public double Latitude { get; set; }
-    public double Longitude { get; set; }
-    public double Altitude { get; set; }
-    
-    // Aircraft attitude
-    public double Pitch { get; set; }
-    public double Bank { get; set; }
-    public double Heading { get; set; }
-    
-    // Aircraft controls
-    public double Throttle { get; set; }
-    public double Aileron { get; set; }
-    public double Elevator { get; set; }
-    public double Rudder { get; set; }
-    public double BrakeLeft { get; set; }
-    public double BrakeRight { get; set; }
-    public double ParkingBrake { get; set; }
-    public double Mixture { get; set; }
-    public int Flaps { get; set; }
-    public int Gear { get; set; }
-    
-    // Physics properties
-    public double GroundSpeed { get; set; }
-    public double VerticalSpeed { get; set; }
-    public double AirspeedTrue { get; set; }
-    public double AirspeedIndicated { get; set; }
-    public double VelocityBodyX { get; set; }
-    public double VelocityBodyY { get; set; }
-    public double VelocityBodyZ { get; set; }
-    public double OnGround { get; set; }
-}
-
-// The SignalR hub supporting both YourControls and legacy protocols
+// The SignalR hub for YourControls synchronization
 public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
@@ -110,23 +71,6 @@ public class CockpitHub : Hub
             
         // Send the data to all OTHER clients in the session group (exclude sender)
         await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("ReceiveSyncData", data);
-    }
-
-    // Legacy aircraft data method for backward compatibility
-    public async Task SendAircraftData(string sessionCode, AircraftData data)
-    {
-        // Ensure the data has a timestamp
-        if (data.Timestamp == 0)
-        {
-            data.Timestamp = DateTime.UtcNow.Ticks;
-        }
-        
-        // Log essential info to avoid console spam
-        _logger.LogInformation("Legacy data from {ConnectionId} in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
-            Context.ConnectionId, sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
-            
-        // Send the data to all clients in the session group
-        await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
     }
 
     public override async Task OnConnectedAsync()
