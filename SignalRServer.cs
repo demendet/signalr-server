@@ -41,7 +41,7 @@ public class AircraftDataDto
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
-    // Physics properties
+    // Physics propertieshehe
     public double GroundSpeed { get; set; }
     public double VerticalSpeed { get; set; }
     public double AirspeedTrue { get; set; }
