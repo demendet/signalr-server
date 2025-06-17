@@ -3,8 +3,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
-using System.Collections.Generic;
-using System;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,9 +11,8 @@ builder.Logging.AddConsole();
 
 // Add SignalR services with increased buffer size for smoother data flow
 builder.Services.AddSignalR(options => {
-    options.MaximumReceiveMessageSize = 1024000; // 1MB for YourControls data
-    options.StreamBufferCapacity = 50; // Increase buffer capacity for 100Hz sync
-    options.EnableDetailedErrors = true;
+    options.MaximumReceiveMessageSize = 102400; // 100KB
+    options.StreamBufferCapacity = 20; // Increase buffer capacity
 });
 
 var app = builder.Build();
@@ -25,16 +22,37 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// YourControls SyncData class matching the client implementation
-public class SyncData
+// Enhanced AircraftData class with physics properties
+public class AircraftData
 {
-    public Dictionary<string, double> Variables { get; set; } = new();
-    public bool IsUnreliable { get; set; }
-    public long Time { get; set; }
-    public string From { get; set; } = "";
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public double Altitude { get; set; }
+    public double Pitch { get; set; }
+    public double Bank { get; set; }
+    public double Heading { get; set; }
+    public double Throttle { get; set; }
+    public double Aileron { get; set; }
+    public double Elevator { get; set; }
+    public double Rudder { get; set; }
+    public double BrakeLeft { get; set; }
+    public double BrakeRight { get; set; }
+    public double ParkingBrake { get; set; } // Keep as double for consistency with client
+    public double Mixture { get; set; }
+    public int Flaps { get; set; }
+    public int Gear { get; set; }
+    // Physics properties
+    public double GroundSpeed { get; set; }
+    public double VerticalSpeed { get; set; }
+    public double AirspeedTrue { get; set; }
+    public double AirspeedIndicated { get; set; }
+    public double OnGround { get; set; }
+    public double VelocityBodyX { get; set; }
+    public double VelocityBodyY { get; set; }
+    public double VelocityBodyZ { get; set; }
 }
 
-// The SignalR hub for YourControls synchronization
+// The SignalR hub
 public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
@@ -50,66 +68,12 @@ public class CockpitHub : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
     }
 
-    // Add the missing TestMessage method
-    public async Task TestMessage(string sessionCode, string message)
+    public async Task SendAircraftData(string sessionCode, AircraftData data)
     {
-        _logger.LogInformation("Test message from {ConnectionId} in session {SessionCode}: {Message}", Context.ConnectionId, sessionCode, message);
-        await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("TestMessage", message);
-    }
-
-    // YourControls sync data method - accept Dictionary directly
-    public async Task SendSyncData(string sessionCode, Dictionary<string, double> variables)
-    {
-        // Create SyncData object from the dictionary
-        var data = new SyncData
-        {
-            Variables = variables,
-            Time = DateTime.UtcNow.Ticks,
-            From = Context.ConnectionId,
-            IsUnreliable = false
-        };
-        
-        // Reduced logging to prevent spam
-        if (variables.Count > 0)
-        {
-            _logger.LogDebug("Sync from {ConnectionId}: {VariableCount} vars", Context.ConnectionId, variables.Count);
-        }
+        // Only log essential info to avoid console spam
+        _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
+            sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
             
-        // Send the dictionary directly to match client expectations
-        await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("ReceiveSyncData", variables);
-    }
-
-    // Keep the original SyncData method for compatibility
-    public async Task SendSyncDataObject(string sessionCode, SyncData data)
-    {
-        // Ensure the data has a timestamp
-        if (data.Time == 0)
-        {
-            data.Time = DateTime.UtcNow.Ticks;
-        }
-        
-        // Set the sender
-        data.From = Context.ConnectionId;
-        
-        // Reduced logging to prevent spam
-        if (data.Variables.Count > 0)
-        {
-            _logger.LogDebug("SyncData from {ConnectionId}: {VariableCount} vars", Context.ConnectionId, data.Variables.Count);
-        }
-            
-        // Send the data to all OTHER clients in the session group (exclude sender)
-        await Clients.GroupExcept(sessionCode, Context.ConnectionId).SendAsync("ReceiveSyncData", data.Variables);
-    }
-
-    public override async Task OnConnectedAsync()
-    {
-        _logger.LogInformation("Client {ConnectionId} connected", Context.ConnectionId);
-        await base.OnConnectedAsync();
-    }
-
-    public override async Task OnDisconnectedAsync(Exception? exception)
-    {
-        _logger.LogInformation("Client {ConnectionId} disconnected: {Exception}", Context.ConnectionId, exception?.Message ?? "Normal disconnect");
-        await base.OnDisconnectedAsync(exception);
+        await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
     }
 }
