@@ -22,7 +22,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// Enhanced AircraftData class with physics properties
+// Enhanced AircraftDataDto class with physics properties
 public class AircraftDataDto
 {
     public double Latitude { get; set; }
@@ -68,7 +68,7 @@ public class CockpitHub : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
     }
 
-    public async Task SendAircraftData(string sessionCode, AircraftData data)
+    public async Task SendAircraftData(string sessionCode, AircraftDataDto data)
     {
         // Only log essential info to avoid console spam
         _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
