@@ -23,7 +23,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 app.Run();
 
 // Enhanced AircraftData class with physics properties
-public class AircraftData
+public class AircraftDataDto
 {
     public double Latitude { get; set; }
     public double Longitude { get; set; }
