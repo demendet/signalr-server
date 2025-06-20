@@ -16,135 +16,78 @@ builder.Logging.AddConsole();
 // Add SignalR services
 builder.Services.AddSignalR(options =>
 {
-    options.MaximumReceiveMessageSize = 1024000; // 1MB for audio data
+    options.MaximumReceiveMessageSize = 102400; // 100KB
     options.EnableDetailedErrors = true;
-});
-
-// Add CORS for cross-origin requests
-builder.Services.AddCors(options =>
-{
-    options.AddDefaultPolicy(policy =>
-    {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
-    });
 });
 
 var app = builder.Build();
 
-// Use CORS
-app.UseCors();
-
 // Map the hub
-app.MapHub<MissionHub>("/missionhub");
+app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// --- Data Transfer Objects ---
+// --- Data Transfer Objects and Hub Implementation ---
 
 public class AircraftDataDto
 {
     public double Latitude { get; set; }
     public double Longitude { get; set; }
     public double Altitude { get; set; }
+    public double Pitch { get; set; }
+    public double Bank { get; set; }
     public double Heading { get; set; }
-    public double Airspeed { get; set; }
+    public double Throttle { get; set; }
+    public double Aileron { get; set; }
+    public double Elevator { get; set; }
+    public double Rudder { get; set; }
+    public double BrakeLeft { get; set; }
+    public double BrakeRight { get; set; }
+    public double ParkingBrake { get; set; }
+    public double Mixture { get; set; }
+    public int Flaps { get; set; }
+    public int Gear { get; set; }
+    public double GroundSpeed { get; set; }
     public double VerticalSpeed { get; set; }
-    public string Callsign { get; set; } = string.Empty;
-    public string AircraftTitle { get; set; } = string.Empty;
-    public double Weight { get; set; }
-    public DateTime LastUpdate { get; set; }
+    public double AirspeedTrue { get; set; }
+    public double AirspeedIndicated { get; set; }
+    public double OnGround { get; set; }
+    public double VelocityBodyX { get; set; }
+    public double VelocityBodyY { get; set; }
+    public double VelocityBodyZ { get; set; }
+    public double ElevatorTrimPosition { get; set; }
+    public double LightBeacon { get; set; }
+    public double LightLanding { get; set; }
+    public double LightTaxi { get; set; }
+    public double LightNav { get; set; }
+    public double LightStrobe { get; set; }
+    public double PitotHeat { get; set; }
 }
 
-public class MissionDto
-{
-    public string MissionId { get; set; } = string.Empty;
-    public string Type { get; set; } = string.Empty; // "pickup", "transport", "emergency"
-    public string PassengerName { get; set; } = string.Empty;
-    public string PassengerType { get; set; } = string.Empty; // "tourist", "drunk", "emergency"
-    public LocationDto DepartureLocation { get; set; } = new();
-    public LocationDto DestinationLocation { get; set; } = new();
-    public DateTime ScheduledTime { get; set; }
-    public string Status { get; set; } = "pending"; // pending, accepted, in_progress, completed
-    public string AcceptedBy { get; set; } = string.Empty;
-    public string Description { get; set; } = string.Empty;
-    public bool IsUrgent { get; set; }
-    public double PaymentAmount { get; set; }
-    public string Language { get; set; } = "norwegian"; // norwegian, english
-}
-
-public class LocationDto
-{
-    public string Name { get; set; } = string.Empty;
-    public double Latitude { get; set; }
-    public double Longitude { get; set; }
-    public string Description { get; set; } = string.Empty;
-}
-
-public class PhoneCallDto
-{
-    public string CallId { get; set; } = string.Empty;
-    public string CallerName { get; set; } = string.Empty;
-    public string CallerType { get; set; } = string.Empty;
-    public string Language { get; set; } = string.Empty;
-    public bool IsActive { get; set; }
-    public DateTime StartTime { get; set; }
-    public string SessionCode { get; set; } = string.Empty;
-    public string AssignedTo { get; set; } = string.Empty;
-}
-
-public class ConversationMessageDto
-{
-    public string CallId { get; set; } = string.Empty;
-    public string Speaker { get; set; } = string.Empty; // "pilot", "passenger"
-    public string Message { get; set; } = string.Empty;
-    public DateTime Timestamp { get; set; }
-    public bool IsAudioMessage { get; set; }
-}
-
-public class PilotStatusDto
-{
-    public string PilotId { get; set; } = string.Empty;
-    public string Callsign { get; set; } = string.Empty;
-    public bool IsReady { get; set; }
-    public bool IsOnMission { get; set; }
-    public LocationDto CurrentLocation { get; set; } = new();
-    public DateTime LastUpdate { get; set; }
-}
-
-// --- Session Management ---
 public class SessionInfo
 {
     public HashSet<string> ConnectionIds { get; set; } = new();
-    public Dictionary<string, PilotStatusDto> Pilots { get; set; } = new();
-    public List<MissionDto> Missions { get; set; } = new();
-    public List<PhoneCallDto> ActiveCalls { get; set; } = new();
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
-    public string CurrentMissionId { get; set; } = string.Empty;
 }
 
-// --- SignalR Hub Implementation ---
-public class MissionHub : Hub
+public class CockpitHub : Hub
 {
-    private readonly ILogger<MissionHub> _logger;
+    private readonly ILogger<CockpitHub> _logger;
     
     private static readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
     private static readonly ConcurrentDictionary<string, string> _connectionToSession = new();
-    private static readonly ConcurrentDictionary<string, string> _connectionToPilotId = new();
     private static readonly object _lockObject = new object();
 
-    public MissionHub(ILogger<MissionHub> logger)
+    public CockpitHub(ILogger<CockpitHub> logger)
     {
         _logger = logger;
     }
 
-    // Session Management
-    public async Task JoinSession(string sessionCode, string pilotId, string callsign)
+    public async Task JoinSession(string sessionCode)
     {
-        if (string.IsNullOrWhiteSpace(sessionCode) || string.IsNullOrWhiteSpace(pilotId))
+        if (string.IsNullOrWhiteSpace(sessionCode))
         {
-            _logger.LogWarning("Connection {ConnectionId} attempted to join with invalid parameters", Context.ConnectionId);
+            _logger.LogWarning("Connection {ConnectionId} attempted to join with empty session code", Context.ConnectionId);
             return;
         }
 
@@ -152,10 +95,19 @@ public class MissionHub : Hub
         
         lock (_lockObject)
         {
-            // Remove from old session if exists
+            // Check if this connection is already in a session
             if (_connectionToSession.TryGetValue(Context.ConnectionId, out string? existingSession))
             {
-                LeaveSessionInternal(Context.ConnectionId, existingSession);
+                if (existingSession == sessionCode)
+                {
+                    _logger.LogWarning("Connection {ConnectionId} already in session {SessionCode}", Context.ConnectionId, sessionCode);
+                    return; // Already in this session
+                }
+                else
+                {
+                    // Remove from old session first
+                    LeaveSessionInternal(Context.ConnectionId, existingSession);
+                }
             }
 
             // Get or create session
@@ -164,282 +116,43 @@ public class MissionHub : Hub
             // Add connection to session
             session.ConnectionIds.Add(Context.ConnectionId);
             session.LastActivity = DateTime.UtcNow;
-            
-            // Add pilot info
-            session.Pilots[pilotId] = new PilotStatusDto
-            {
-                PilotId = pilotId,
-                Callsign = callsign,
-                IsReady = false,
-                IsOnMission = false,
-                LastUpdate = DateTime.UtcNow
-            };
-            
             _connectionToSession[Context.ConnectionId] = sessionCode;
-            _connectionToPilotId[Context.ConnectionId] = pilotId;
         }
 
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
         
-        _logger.LogInformation("Pilot {PilotId} ({Callsign}) joined session {SessionCode}", pilotId, callsign, sessionCode);
-        
-        // Notify others about the new pilot
-        await Clients.OthersInGroup(sessionCode).SendAsync("PilotJoined", pilotId, callsign);
-        
-        // Send current session state to the new pilot
-        var currentSession = _sessions[sessionCode];
-        await Clients.Caller.SendAsync("SessionState", currentSession.Pilots.Values, currentSession.Missions, currentSession.ActiveCalls);
+        _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode} (Total connections: {Count})", 
+            Context.ConnectionId, sessionCode, _sessions[sessionCode].ConnectionIds.Count);
     }
-
-    // Pilot Status Updates
-    public async Task UpdatePilotStatus(bool isReady, LocationDto? currentLocation = null)
+    
+    public async Task SendAircraftData(string sessionCode, AircraftDataDto data)
     {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode) ||
-            !_connectionToPilotId.TryGetValue(Context.ConnectionId, out string? pilotId))
-            return;
-
-        lock (_lockObject)
+        if (string.IsNullOrWhiteSpace(sessionCode)) return;
+        
+        sessionCode = sessionCode.ToLowerInvariant().Trim();
+        
+        if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
         {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session) &&
-                session.Pilots.TryGetValue(pilotId, out PilotStatusDto? pilot))
+            lock (_lockObject)
             {
-                pilot.IsReady = isReady;
-                if (currentLocation != null)
-                    pilot.CurrentLocation = currentLocation;
-                pilot.LastUpdate = DateTime.UtcNow;
                 session.LastActivity = DateTime.UtcNow;
             }
-        }
-
-        await Clients.OthersInGroup(sessionCode).SendAsync("PilotStatusUpdated", pilotId, isReady, currentLocation);
-        
-        _logger.LogInformation("Pilot {PilotId} status updated: Ready={IsReady}", pilotId, isReady);
-    }
-
-    // Aircraft Data Sharing
-    public async Task SendAircraftData(AircraftDataDto data)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
             
-        lock (_lockObject)
-        {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-            {
-                session.LastActivity = DateTime.UtcNow;
-            }
+            // Simply relay data to all other connections in the session
+            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
         }
-        
-        // Relay aircraft data to all other pilots in the session
-        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
     }
-
-    // Mission Management
-    public async Task CreateMission(MissionDto mission)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-
-        mission.MissionId = Guid.NewGuid().ToString();
-        mission.Status = "pending";
-
-        lock (_lockObject)
-        {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-            {
-                session.Missions.Add(mission);
-                session.LastActivity = DateTime.UtcNow;
-            }
-        }
-
-        await Clients.Group(sessionCode).SendAsync("NewMission", mission);
-        
-        _logger.LogInformation("New mission created: {MissionId} - {Type} from {Departure} to {Destination}", 
-            mission.MissionId, mission.Type, mission.DepartureLocation.Name, mission.DestinationLocation.Name);
-    }
-
-    public async Task AcceptMission(string missionId)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode) ||
-            !_connectionToPilotId.TryGetValue(Context.ConnectionId, out string? pilotId))
-            return;
-
-        lock (_lockObject)
-        {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-            {
-                var mission = session.Missions.FirstOrDefault(m => m.MissionId == missionId);
-                if (mission != null && mission.Status == "pending")
-                {
-                    mission.Status = "accepted";
-                    mission.AcceptedBy = pilotId;
-                    session.CurrentMissionId = missionId;
-                    
-                    // Update pilot status
-                    if (session.Pilots.TryGetValue(pilotId, out PilotStatusDto? pilot))
-                    {
-                        pilot.IsOnMission = true;
-                    }
-                }
-                session.LastActivity = DateTime.UtcNow;
-            }
-        }
-
-        await Clients.Group(sessionCode).SendAsync("MissionAccepted", missionId, pilotId);
-        
-        _logger.LogInformation("Mission {MissionId} accepted by pilot {PilotId}", missionId, pilotId);
-    }
-
-    public async Task UpdateMissionStatus(string missionId, string status)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-
-        lock (_lockObject)
-        {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-            {
-                var mission = session.Missions.FirstOrDefault(m => m.MissionId == missionId);
-                if (mission != null)
-                {
-                    mission.Status = status;
-                    
-                    // If mission is completed, update pilot status
-                    if (status == "completed" && session.Pilots.TryGetValue(mission.AcceptedBy, out PilotStatusDto? pilot))
-                    {
-                        pilot.IsOnMission = false;
-                        pilot.IsReady = true;
-                    }
-                }
-                session.LastActivity = DateTime.UtcNow;
-            }
-        }
-
-        await Clients.Group(sessionCode).SendAsync("MissionStatusUpdated", missionId, status);
-        
-        _logger.LogInformation("Mission {MissionId} status updated to {Status}", missionId, status);
-    }
-
-    // Phone Call Management
-    public async Task StartPhoneCall(PhoneCallDto phoneCall)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-
-        phoneCall.CallId = Guid.NewGuid().ToString();
-        phoneCall.SessionCode = sessionCode;
-        phoneCall.StartTime = DateTime.UtcNow;
-        phoneCall.IsActive = true;
-
-        lock (_lockObject)
-        {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-            {
-                session.ActiveCalls.Add(phoneCall);
-                session.LastActivity = DateTime.UtcNow;
-            }
-        }
-
-        // Notify all pilots about incoming call
-        await Clients.Group(sessionCode).SendAsync("IncomingCall", phoneCall);
-        
-        _logger.LogInformation("Phone call started: {CallId} - {CallerName} ({CallerType})", 
-            phoneCall.CallId, phoneCall.CallerName, phoneCall.CallerType);
-    }
-
-    public async Task AnswerCall(string callId)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode) ||
-            !_connectionToPilotId.TryGetValue(Context.ConnectionId, out string? pilotId))
-            return;
-
-        lock (_lockObject)
-        {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-            {
-                var call = session.ActiveCalls.FirstOrDefault(c => c.CallId == callId);
-                if (call != null)
-                {
-                    call.AssignedTo = pilotId;
-                }
-                session.LastActivity = DateTime.UtcNow;
-            }
-        }
-
-        await Clients.Group(sessionCode).SendAsync("CallAnswered", callId, pilotId);
-        
-        _logger.LogInformation("Call {CallId} answered by pilot {PilotId}", callId, pilotId);
-    }
-
-    public async Task HangUpCall(string callId)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-
-        lock (_lockObject)
-        {
-            if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-            {
-                var call = session.ActiveCalls.FirstOrDefault(c => c.CallId == callId);
-                if (call != null)
-                {
-                    call.IsActive = false;
-                    session.ActiveCalls.Remove(call);
-                }
-                session.LastActivity = DateTime.UtcNow;
-            }
-        }
-
-        await Clients.Group(sessionCode).SendAsync("CallEnded", callId);
-        
-        _logger.LogInformation("Call {CallId} ended", callId);
-    }
-
-    // Conversation Management
-    public async Task SendConversationMessage(ConversationMessageDto message)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-
-        message.Timestamp = DateTime.UtcNow;
-
-        // Relay conversation message to all participants
-        await Clients.Group(sessionCode).SendAsync("ConversationMessage", message);
-        
-        _logger.LogDebug("Conversation message sent for call {CallId}: {Speaker} - {Message}", 
-            message.CallId, message.Speaker, message.Message);
-    }
-
-    // Audio Data Relay
-    public async Task SendAudioData(string callId, byte[] audioData, string audioFormat)
-    {
-        if (!_connectionToSession.TryGetValue(Context.ConnectionId, out string? sessionCode))
-            return;
-
-        // Relay audio data to other participants
-        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAudioData", callId, audioData, audioFormat);
-    }
-
-    // Cleanup on disconnect
+    
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
         string? sessionCode = null;
-        string? pilotId = null;
         
         lock (_lockObject)
         {
-            _connectionToSession.TryRemove(Context.ConnectionId, out sessionCode);
-            _connectionToPilotId.TryRemove(Context.ConnectionId, out pilotId);
-            
-            if (sessionCode != null)
+            if (_connectionToSession.TryRemove(Context.ConnectionId, out sessionCode))
             {
                 LeaveSessionInternal(Context.ConnectionId, sessionCode);
             }
-        }
-        
-        if (sessionCode != null && pilotId != null)
-        {
-            await Clients.Group(sessionCode).SendAsync("PilotLeft", pilotId);
         }
         
         if (exception != null)
@@ -448,7 +161,7 @@ public class MissionHub : Hub
         }
         else
         {
-            _logger.LogInformation("Pilot {PilotId} disconnected from session {SessionCode}", pilotId, sessionCode);
+            _logger.LogInformation("Connection {ConnectionId} disconnected normally", Context.ConnectionId);
         }
         
         await base.OnDisconnectedAsync(exception);
@@ -456,8 +169,7 @@ public class MissionHub : Hub
     
     private void LeaveSessionInternal(string connectionId, string sessionCode)
     {
-        if (!_sessions.TryGetValue(sessionCode, out SessionInfo? session)) 
-            return;
+        if (!_sessions.TryGetValue(sessionCode, out SessionInfo? session)) return;
         
         session.ConnectionIds.Remove(connectionId);
         
@@ -465,7 +177,12 @@ public class MissionHub : Hub
         if (!session.ConnectionIds.Any())
         {
             _sessions.TryRemove(sessionCode, out _);
-            _logger.LogInformation("Session {SessionCode} removed as all pilots disconnected", sessionCode);
+            _logger.LogInformation("Session {SessionCode} removed as all clients disconnected", sessionCode);
+        }
+        else
+        {
+            _logger.LogInformation("Connection {ConnectionId} left session {SessionCode} (Remaining: {Count})", 
+                connectionId, sessionCode, session.ConnectionIds.Count);
         }
     }
 } 
