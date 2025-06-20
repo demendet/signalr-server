@@ -15,11 +15,8 @@ builder.Services.AddSignalR(options => {
     options.StreamBufferCapacity = 20; // Increase buffer capacity
     options.KeepAliveInterval = TimeSpan.FromSeconds(10); // Reduced from default 15s for better responsiveness
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(25); // Reduced from default 30s
-    options.EnableDetailedErrors = true; // Enable for debugging
-})
-.AddJsonProtocol(options => {
-    // Optimize JSON serialization for high-frequency data
-    options.PayloadSerializerOptions.PropertyNamingPolicy = null; // Keep property names as-is
+    options.EnableDetailedErrors = true; // Enable detailed errors for debugging
+    options.MaximumParallelInvocationsPerClient = 2; // Allow parallel processing
 });
 
 var app = builder.Build();
@@ -29,7 +26,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// Enhanced AircraftDataDto class with physics properties and timestamp
+// Enhanced AircraftDataDto class with physics properties and CRITICAL timestamp
 public class AircraftDataDto
 {
     public double Latitude { get; set; }
@@ -58,11 +55,11 @@ public class AircraftDataDto
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
     
-    // CRITICAL: Add timestamp for buffered interpolation system
+    // CRITICAL: Timestamp for buffered interpolation system
     public long Timestamp { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }
 
-// The SignalR hub with enhanced logging and error handling
+// The SignalR hub with enhanced error handling and performance monitoring
 public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
@@ -80,29 +77,19 @@ public class CockpitHub : Hub
 
     public async Task SendAircraftData(string sessionCode, AircraftDataDto data)
     {
-        try
+        // Ensure timestamp is set (fallback if client doesn't set it)
+        if (data.Timestamp == 0)
         {
-            // Ensure timestamp is set if not already provided by client
-            if (data.Timestamp == 0)
-            {
-                data.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            }
+            data.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+        
+        // Only log essential info to avoid console spam, but include timing info
+        _logger.LogInformation("Host data in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, Timestamp={Timestamp}", 
+            sessionCode, data.Altitude, data.GroundSpeed, data.Timestamp);
             
-            // Only log essential info to avoid console spam (reduce frequency)
-            if (DateTime.UtcNow.Millisecond % 500 < 50) // Log roughly every 500ms
-            {
-                _logger.LogInformation("Relaying data in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}, Timestamp={Timestamp}", 
-                    sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated, data.Timestamp);
-            }
-                
-            await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error sending aircraft data in session {SessionCode}", sessionCode);
-        }
+        await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
     }
-
+    
     public override async Task OnConnectedAsync()
     {
         _logger.LogInformation("Client {ConnectionId} connected", Context.ConnectionId);
@@ -113,11 +100,11 @@ public class CockpitHub : Hub
     {
         if (exception != null)
         {
-            _logger.LogWarning(exception, "Client {ConnectionId} disconnected with error", Context.ConnectionId);
+            _logger.LogWarning("Client {ConnectionId} disconnected with error: {Error}", Context.ConnectionId, exception.Message);
         }
         else
         {
-            _logger.LogInformation("Client {ConnectionId} disconnected", Context.ConnectionId);
+            _logger.LogInformation("Client {ConnectionId} disconnected cleanly", Context.ConnectionId);
         }
         await base.OnDisconnectedAsync(exception);
     }
