@@ -13,16 +13,11 @@ var builder = WebApplication.CreateBuilder(args);
 // Add console logging
 builder.Logging.AddConsole();
 
-// Add SignalR services with optimized settings for stability
+// Add SignalR services with standard settings
 builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 102400; // 100KB
-    options.StreamBufferCapacity = 20; // Increase buffer capacity
     options.EnableDetailedErrors = true; // Better error reporting
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); // Client timeout
-    options.KeepAliveInterval = TimeSpan.FromSeconds(15); // Keep alive interval
-    options.HandshakeTimeout = TimeSpan.FromSeconds(15); // Handshake timeout
-    options.MaximumParallelInvocationsPerClient = 10; // Allow parallel calls
 });
 
 var app = builder.Build();
@@ -91,18 +86,8 @@ public class G1000SoftkeyPressDto
 public class SessionInfo
 {
     public string ControllerConnectionId { get; set; } = string.Empty;
-    public string OriginalControllerConnectionId { get; set; } = string.Empty; // Remember original controller
     public HashSet<string> ConnectionIds { get; set; } = new();
-    public Dictionary<string, DateTime> ConnectionJoinTimes { get; set; } = new(); // Track when connections joined
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
-}
-
-// Store mapping of old connection IDs to new ones for reconnection handling
-public class ReconnectionInfo
-{
-    public string SessionCode { get; set; } = string.Empty;
-    public bool WasController { get; set; } = false;
-    public DateTime DisconnectTime { get; set; } = DateTime.UtcNow;
 }
 
 public class CockpitHub : Hub
@@ -112,7 +97,6 @@ public class CockpitHub : Hub
     // Thread-safe collections to prevent race conditions
     private static readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
     private static readonly ConcurrentDictionary<string, string> _connectionToSession = new();
-    private static readonly ConcurrentDictionary<string, ReconnectionInfo> _recentDisconnections = new();
     private static readonly object _lockObject = new object();
 
     public CockpitHub(ILogger<CockpitHub> logger)
@@ -152,7 +136,6 @@ public class CockpitHub : Hub
             
             // Add connection to session
             session.ConnectionIds.Add(Context.ConnectionId);
-            session.ConnectionJoinTimes[Context.ConnectionId] = DateTime.UtcNow;
             session.LastActivity = DateTime.UtcNow;
             _connectionToSession[Context.ConnectionId] = sessionCode;
         }
@@ -160,39 +143,14 @@ public class CockpitHub : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
         
         bool hasControl = false;
-        bool isReconnection = false;
-        
         lock (_lockObject)
         {
             var session = _sessions[sessionCode];
             
-            // Check if this is a reconnection of a previous controller
-            var recentDisconnection = _recentDisconnections.Values
-                .Where(r => r.SessionCode == sessionCode && r.WasController && 
-                           (DateTime.UtcNow - r.DisconnectTime).TotalSeconds < 30)
-                .OrderByDescending(r => r.DisconnectTime)
-                .FirstOrDefault();
-            
-            if (recentDisconnection != null)
+            // Assign control if no one has it
+            if (string.IsNullOrEmpty(session.ControllerConnectionId))
             {
-                // This is likely a reconnection of the original controller
                 session.ControllerConnectionId = Context.ConnectionId;
-                hasControl = true;
-                isReconnection = true;
-                _logger.LogInformation("Controller reconnected and control restored to {ControlId} in session {SessionCode}", Context.ConnectionId, sessionCode);
-                
-                // Clean up the reconnection info
-                var toRemove = _recentDisconnections.Where(kvp => kvp.Value == recentDisconnection).Select(kvp => kvp.Key).ToList();
-                foreach (var key in toRemove)
-                {
-                    _recentDisconnections.TryRemove(key, out _);
-                }
-            }
-            else if (string.IsNullOrEmpty(session.ControllerConnectionId))
-            {
-                // Assign control to first connection (original host)
-                session.ControllerConnectionId = Context.ConnectionId;
-                session.OriginalControllerConnectionId = Context.ConnectionId;
                 hasControl = true;
                 _logger.LogInformation("Initial control assigned to {ControlId} in session {SessionCode}", Context.ConnectionId, sessionCode);
             }
@@ -204,12 +162,6 @@ public class CockpitHub : Hub
         }
 
         await Clients.Caller.SendAsync("ControlStatusChanged", hasControl);
-        
-        if (isReconnection)
-        {
-            _logger.LogInformation("Reconnection successful for controller {ConnectionId} in session {SessionCode}", Context.ConnectionId, sessionCode);
-        }
-        
         _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode} (Total connections: {Count})", 
             Context.ConnectionId, sessionCode, _sessions[sessionCode].ConnectionIds.Count);
     }
@@ -328,41 +280,22 @@ public class CockpitHub : Hub
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
         string? sessionCode = null;
-        bool wasController = false;
         
         lock (_lockObject)
         {
             if (_connectionToSession.TryRemove(Context.ConnectionId, out sessionCode))
             {
-                if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
-                {
-                    wasController = session.ControllerConnectionId == Context.ConnectionId;
-                    
-                    // Store reconnection info for potential reconnection
-                    if (wasController)
-                    {
-                        _recentDisconnections[Context.ConnectionId] = new ReconnectionInfo
-                        {
-                            SessionCode = sessionCode,
-                            WasController = true,
-                            DisconnectTime = DateTime.UtcNow
-                        };
-                    }
-                }
-                
                 LeaveSessionInternal(Context.ConnectionId, sessionCode);
             }
         }
         
         if (exception != null)
         {
-            _logger.LogWarning("Connection {ConnectionId} disconnected with exception: {Exception} (Was Controller: {WasController})", 
-                Context.ConnectionId, exception.Message, wasController);
+            _logger.LogWarning("Connection {ConnectionId} disconnected with exception: {Exception}", Context.ConnectionId, exception.Message);
         }
         else
         {
-            _logger.LogInformation("Connection {ConnectionId} disconnected normally (Was Controller: {WasController})", 
-                Context.ConnectionId, wasController);
+            _logger.LogInformation("Connection {ConnectionId} disconnected normally", Context.ConnectionId);
         }
         
         await base.OnDisconnectedAsync(exception);
@@ -373,7 +306,6 @@ public class CockpitHub : Hub
         if (!_sessions.TryGetValue(sessionCode, out SessionInfo? session)) return;
         
         session.ConnectionIds.Remove(connectionId);
-        session.ConnectionJoinTimes.Remove(connectionId);
         
         // Handle control transfer if controller left
         if (session.ControllerConnectionId == connectionId)
