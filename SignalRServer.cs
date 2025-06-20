@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
+using System;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
@@ -218,12 +219,12 @@ public class CockpitHub : Hub
         await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveG1000SoftkeyPress", press);
     }
     
-    public async Task TransferControl(string sessionCode, bool giving)
+    public Task TransferControl(string sessionCode, bool giving)
     {
-        if (string.IsNullOrWhiteSpace(sessionCode)) return;
+        if (string.IsNullOrWhiteSpace(sessionCode)) return Task.CompletedTask;
         sessionCode = sessionCode.ToLowerInvariant().Trim();
         
-        if (!_sessions.TryGetValue(sessionCode, out SessionInfo? session)) return;
+        if (!_sessions.TryGetValue(sessionCode, out SessionInfo? session)) return Task.CompletedTask;
         
         lock (_lockObject)
         {
@@ -240,7 +241,7 @@ public class CockpitHub : Hub
                         session.LastActivity = DateTime.UtcNow;
                         
                         // Notify both parties
-                        Task.Run(async () =>
+                        _ = Task.Run(async () =>
                         {
                             await Clients.Caller.SendAsync("ControlStatusChanged", false);
                             await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
@@ -260,7 +261,7 @@ public class CockpitHub : Hub
                     session.LastActivity = DateTime.UtcNow;
                     
                     // Notify both parties
-                    Task.Run(async () =>
+                    _ = Task.Run(async () =>
                     {
                         await Clients.Caller.SendAsync("ControlStatusChanged", true);
                         if (!string.IsNullOrEmpty(oldController) && session.ConnectionIds.Contains(oldController))
@@ -273,6 +274,8 @@ public class CockpitHub : Hub
                 }
             }
         }
+        
+        return Task.CompletedTask;
     }
     
     public override async Task OnDisconnectedAsync(Exception? exception)
@@ -315,7 +318,7 @@ public class CockpitHub : Hub
                 session.LastActivity = DateTime.UtcNow;
                 
                 // Notify new controller
-                Task.Run(async () =>
+                _ = Task.Run(async () =>
                 {
                     await Clients.Client(newController).SendAsync("ControlStatusChanged", true);
                 });
