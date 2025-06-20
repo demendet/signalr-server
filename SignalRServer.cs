@@ -9,10 +9,17 @@ var builder = WebApplication.CreateBuilder(args);
 // Add console logging.
 builder.Logging.AddConsole();
 
-// Add SignalR services with increased buffer size for smoother data flow
+// Add SignalR services optimized for the new buffered interpolation system
 builder.Services.AddSignalR(options => {
     options.MaximumReceiveMessageSize = 102400; // 100KB
     options.StreamBufferCapacity = 20; // Increase buffer capacity
+    options.KeepAliveInterval = TimeSpan.FromSeconds(10); // Reduced from default 15s for better responsiveness
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(25); // Reduced from default 30s
+    options.EnableDetailedErrors = true; // Enable for debugging
+})
+.AddJsonProtocol(options => {
+    // Optimize JSON serialization for high-frequency data
+    options.PayloadSerializerOptions.PropertyNamingPolicy = null; // Keep property names as-is
 });
 
 var app = builder.Build();
@@ -22,7 +29,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 
 app.Run();
 
-// Enhanced AircraftDataDto class with physics properties
+// Enhanced AircraftDataDto class with physics properties and timestamp
 public class AircraftDataDto
 {
     public double Latitude { get; set; }
@@ -41,7 +48,7 @@ public class AircraftDataDto
     public double Mixture { get; set; }
     public int Flaps { get; set; }
     public int Gear { get; set; }
-    // Physics propertieshehe
+    // Physics properties
     public double GroundSpeed { get; set; }
     public double VerticalSpeed { get; set; }
     public double AirspeedTrue { get; set; }
@@ -50,9 +57,12 @@ public class AircraftDataDto
     public double VelocityBodyX { get; set; }
     public double VelocityBodyY { get; set; }
     public double VelocityBodyZ { get; set; }
+    
+    // CRITICAL: Add timestamp for buffered interpolation system
+    public long Timestamp { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }
 
-// The SignalR hub
+// The SignalR hub with enhanced logging and error handling
 public class CockpitHub : Hub
 {
     private readonly ILogger<CockpitHub> _logger;
@@ -70,10 +80,45 @@ public class CockpitHub : Hub
 
     public async Task SendAircraftData(string sessionCode, AircraftDataDto data)
     {
-        // Only log essential info to avoid console spam
-        _logger.LogInformation("Received data from host in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}", 
-            sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated);
+        try
+        {
+            // Ensure timestamp is set if not already provided by client
+            if (data.Timestamp == 0)
+            {
+                data.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
             
-        await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
+            // Only log essential info to avoid console spam (reduce frequency)
+            if (DateTime.UtcNow.Millisecond % 500 < 50) // Log roughly every 500ms
+            {
+                _logger.LogInformation("Relaying data in session {SessionCode}: Alt={Alt:F1}, GS={GS:F1}, IAS={IAS:F1}, Timestamp={Timestamp}", 
+                    sessionCode, data.Altitude, data.GroundSpeed, data.AirspeedIndicated, data.Timestamp);
+            }
+                
+            await Clients.Group(sessionCode).SendAsync("ReceiveAircraftData", data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending aircraft data in session {SessionCode}", sessionCode);
+        }
     }
-}
+
+    public override async Task OnConnectedAsync()
+    {
+        _logger.LogInformation("Client {ConnectionId} connected", Context.ConnectionId);
+        await base.OnConnectedAsync();
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        if (exception != null)
+        {
+            _logger.LogWarning(exception, "Client {ConnectionId} disconnected with error", Context.ConnectionId);
+        }
+        else
+        {
+            _logger.LogInformation("Client {ConnectionId} disconnected", Context.ConnectionId);
+        }
+        await base.OnDisconnectedAsync(exception);
+    }
+} 
