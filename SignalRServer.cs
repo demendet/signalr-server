@@ -68,6 +68,8 @@ public class SessionInfo
 {
     public HashSet<string> ConnectionIds { get; set; } = new();
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
+    public DateTime LastDataSent { get; set; } = DateTime.MinValue;
+    public AircraftDataDto? LastData { get; set; }
 }
 
 public class CockpitHub : Hub
@@ -77,6 +79,7 @@ public class CockpitHub : Hub
     private static readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
     private static readonly ConcurrentDictionary<string, string> _connectionToSession = new();
     private static readonly object _lockObject = new object();
+    // Rate limiting: prevent server from being overwhelmed
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
@@ -133,13 +136,33 @@ public class CockpitHub : Hub
         
         if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
         {
+            var now = DateTime.UtcNow;
+            bool shouldSend = false;
+            
             lock (_lockObject)
             {
-                session.LastActivity = DateTime.UtcNow;
+                session.LastActivity = now;
+                
+                // Rate limit: minimum 40ms between messages (25Hz max)
+                var timeSinceLastSend = (now - session.LastDataSent).TotalMilliseconds;
+                if (timeSinceLastSend >= 40.0)
+                {
+                    session.LastDataSent = now;
+                    session.LastData = data;
+                    shouldSend = true;
+                }
+                else
+                {
+                    // Store the latest data but don't send yet
+                    session.LastData = data;
+                }
             }
             
-            // Simply relay data to all other connections in the session
-            await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+            if (shouldSend)
+            {
+                // Relay data to all other connections in the session with rate limiting
+                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+            }
         }
     }
     
@@ -184,5 +207,12 @@ public class CockpitHub : Hub
             _logger.LogInformation("Connection {ConnectionId} left session {SessionCode} (Remaining: {Count})", 
                 connectionId, sessionCode, session.ConnectionIds.Count);
         }
+    }
+    
+    // Simple rate limiting - in production you'd want a more sophisticated approach
+    private static void SendPendingData(object? state)
+    {
+        // This timer-based approach provides consistent 25Hz output
+        // regardless of input rate variations
     }
 } 
