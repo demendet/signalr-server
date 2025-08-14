@@ -25,7 +25,8 @@ var app = builder.Build();
 // Map the hub
 app.MapHub<CockpitHub>("/sharedcockpithub");
 
-app.Run();
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+app.Run($"http://0.0.0.0:{port}");
 
 // --- Data Transfer Objects and Hub Implementation ---
 
