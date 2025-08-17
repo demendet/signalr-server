@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
 using System.Collections.Concurrent;
+using MessagePack;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,6 +19,7 @@ builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 102400; // 100KB
     options.EnableDetailedErrors = true;
+    options.StreamBufferCapacity = 20;
 });
 
 var app = builder.Build();
@@ -87,7 +89,7 @@ public class CockpitHub : Hub
         _logger = logger;
     }
 
-    public async Task JoinSession(string sessionCode)
+    public async Task JoinSession(string sessionCode, string clientId, bool isHost)
     {
         if (string.IsNullOrWhiteSpace(sessionCode))
         {
@@ -125,11 +127,14 @@ public class CockpitHub : Hub
 
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
         
-        _logger.LogInformation("Connection {ConnectionId} joined session {SessionCode} (Total connections: {Count})", 
-            Context.ConnectionId, sessionCode, _sessions[sessionCode].ConnectionIds.Count);
+        // Notify other clients
+        await Clients.OthersInGroup(sessionCode).SendAsync("ClientConnected", clientId, isHost);
+        
+        _logger.LogInformation("Connection {ConnectionId} ({ClientId}) joined session {SessionCode} as {Role} (Total connections: {Count})", 
+            Context.ConnectionId, clientId, sessionCode, isHost ? "Host" : "Client", _sessions[sessionCode].ConnectionIds.Count);
     }
     
-    public async Task SendAircraftData(string sessionCode, AircraftDataDto data)
+    public async Task SendAircraftData(string sessionCode, byte[] compressedData)
     {
         if (string.IsNullOrWhiteSpace(sessionCode)) return;
         
@@ -144,27 +149,47 @@ public class CockpitHub : Hub
             {
                 session.LastActivity = now;
                 
-                // Rate limit: minimum 40ms between messages (25Hz max)
+                // Rate limit: minimum 20ms between messages (50Hz max)
                 var timeSinceLastSend = (now - session.LastDataSent).TotalMilliseconds;
-                if (timeSinceLastSend >= 40.0)
+                if (timeSinceLastSend >= 20.0)
                 {
                     session.LastDataSent = now;
-                    session.LastData = data;
                     shouldSend = true;
-                }
-                else
-                {
-                    // Store the latest data but don't send yet
-                    session.LastData = data;
                 }
             }
             
             if (shouldSend)
             {
-                // Relay data to all other connections in the session with rate limiting
-                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", data);
+                // Relay compressed data to all other connections in the session
+                await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", compressedData);
             }
         }
+    }
+    
+    public async Task RequestControl(string sessionCode, string clientId)
+    {
+        _logger.LogInformation("Control requested by {ClientId} in session {SessionCode}", clientId, sessionCode);
+        await Clients.Group(sessionCode).SendAsync("ControlTransferred", "system", clientId);
+    }
+    
+    public async Task TransferControl(string sessionCode, string fromClientId, string toClientId)
+    {
+        _logger.LogInformation("Control transferred from {FromClient} to {ToClient} in session {SessionCode}", fromClientId, toClientId, sessionCode);
+        await Clients.Group(sessionCode).SendAsync("ControlTransferred", fromClientId, toClientId);
+    }
+    
+    public async Task LeaveSession(string sessionCode, string clientId)
+    {
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, sessionCode);
+        await Clients.OthersInGroup(sessionCode).SendAsync("ClientDisconnected", clientId);
+        _logger.LogInformation("Client {ClientId} left session {SessionCode}", clientId, sessionCode);
+    }
+    
+    public Task Heartbeat(string clientId)
+    {
+        _logger.LogDebug("Heartbeat from {ClientId}", clientId);
+        // Could update last seen time here if needed
+        return Task.CompletedTask;
     }
     
     public override async Task OnDisconnectedAsync(Exception? exception)
