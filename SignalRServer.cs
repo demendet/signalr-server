@@ -30,41 +30,17 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 app.Run($"http://0.0.0.0:{port}");
 
-// --- Data Transfer Objects and Hub Implementation ---
+// --- DYNAMIC DATA TRANSFER - NO HARDCODING NEEDED! ---
+// Server accepts ANY data structure via binary MessagePack
+// This eliminates the need to modify server when adding new variables
 
-public class AircraftDataDto
+public class SharedCockpitCommand
 {
-    public double Latitude { get; set; }
-    public double Longitude { get; set; }
-    public double Altitude { get; set; }
-    public double Pitch { get; set; }
-    public double Bank { get; set; }
-    public double Heading { get; set; }
-    public double Throttle { get; set; }
-    public double Aileron { get; set; }
-    public double Elevator { get; set; }
-    public double Rudder { get; set; }
-    public double BrakeLeft { get; set; }
-    public double BrakeRight { get; set; }
-    public double ParkingBrake { get; set; }
-    public double Mixture { get; set; }
-    public int Flaps { get; set; }
-    public int Gear { get; set; }
-    public double GroundSpeed { get; set; }
-    public double VerticalSpeed { get; set; }
-    public double AirspeedTrue { get; set; }
-    public double AirspeedIndicated { get; set; }
-    public double OnGround { get; set; }
-    public double VelocityBodyX { get; set; }
-    public double VelocityBodyY { get; set; }
-    public double VelocityBodyZ { get; set; }
-    public double ElevatorTrimPosition { get; set; }
-    public double LightBeacon { get; set; }
-    public double LightLanding { get; set; }
-    public double LightTaxi { get; set; }
-    public double LightNav { get; set; }
-    public double LightStrobe { get; set; }
-    public double PitotHeat { get; set; }
+    public string Type { get; set; } = "";
+    public string SessionCode { get; set; } = "";
+    public string FromClientId { get; set; } = "";
+    public string ToClientId { get; set; } = "";
+    public Dictionary<string, object>? Data { get; set; }
 }
 
 public class SessionInfo
@@ -72,7 +48,8 @@ public class SessionInfo
     public HashSet<string> ConnectionIds { get; set; } = new();
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
     public DateTime LastDataSent { get; set; } = DateTime.MinValue;
-    public AircraftDataDto? LastData { get; set; }
+    public string? CurrentPilotFlying { get; set; }
+    public byte[]? LastAircraftData { get; set; }
 }
 
 public class CockpitHub : Hub
@@ -123,15 +100,22 @@ public class CockpitHub : Hub
             session.ConnectionIds.Add(Context.ConnectionId);
             session.LastActivity = DateTime.UtcNow;
             _connectionToSession[Context.ConnectionId] = sessionCode;
+            
+            // HOST IS ALWAYS INITIAL PILOT FLYING
+            if (isHost && string.IsNullOrEmpty(session.CurrentPilotFlying))
+            {
+                session.CurrentPilotFlying = clientId;
+            }
         }
 
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionCode);
         
-        // Notify other clients
+        // Notify other clients with current pilot flying status
         await Clients.OthersInGroup(sessionCode).SendAsync("ClientConnected", clientId, isHost);
+        await Clients.Group(sessionCode).SendAsync("PilotFlyingChanged", _sessions[sessionCode].CurrentPilotFlying);
         
-        _logger.LogInformation("Connection {ConnectionId} ({ClientId}) joined session {SessionCode} as {Role} (Total connections: {Count})", 
-            Context.ConnectionId, clientId, sessionCode, isHost ? "Host" : "Client", _sessions[sessionCode].ConnectionIds.Count);
+        _logger.LogInformation("Connection {ConnectionId} ({ClientId}) joined session {SessionCode} as {Role}. Current PF: {PF} (Total: {Count})", 
+            Context.ConnectionId, clientId, sessionCode, isHost ? "Host" : "Client", _sessions[sessionCode].CurrentPilotFlying, _sessions[sessionCode].ConnectionIds.Count);
     }
     
     public async Task SendAircraftData(string sessionCode, byte[] compressedData)
@@ -166,16 +150,41 @@ public class CockpitHub : Hub
         }
     }
     
-    public async Task RequestControl(string sessionCode, string clientId)
+    public async Task GiveControl(string sessionCode, string fromClientId, string toClientId)
     {
-        _logger.LogInformation("Control requested by {ClientId} in session {SessionCode}", clientId, sessionCode);
-        await Clients.Group(sessionCode).SendAsync("ControlTransferred", "system", clientId);
+        if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
+        {
+            lock (_lockObject)
+            {
+                // Update who is pilot flying
+                session.CurrentPilotFlying = toClientId;
+                session.LastActivity = DateTime.UtcNow;
+            }
+            
+            _logger.LogInformation("🎯 CONTROL GIVEN from {FromClient} to {ToClient} in session {SessionCode}", fromClientId, toClientId, sessionCode);
+            
+            // Notify ALL clients of the control change
+            await Clients.Group(sessionCode).SendAsync("PilotFlyingChanged", toClientId);
+        }
     }
     
-    public async Task TransferControl(string sessionCode, string fromClientId, string toClientId)
+    public async Task TakeControl(string sessionCode, string clientId)
     {
-        _logger.LogInformation("Control transferred from {FromClient} to {ToClient} in session {SessionCode}", fromClientId, toClientId, sessionCode);
-        await Clients.Group(sessionCode).SendAsync("ControlTransferred", fromClientId, toClientId);
+        if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
+        {
+            string? previousPF = null;
+            lock (_lockObject)
+            {
+                previousPF = session.CurrentPilotFlying;
+                session.CurrentPilotFlying = clientId;
+                session.LastActivity = DateTime.UtcNow;
+            }
+            
+            _logger.LogInformation("🎯 CONTROL TAKEN by {ClientId} from {PreviousClient} in session {SessionCode}", clientId, previousPF, sessionCode);
+            
+            // Notify ALL clients of the control change
+            await Clients.Group(sessionCode).SendAsync("PilotFlyingChanged", clientId);
+        }
     }
     
     public async Task LeaveSession(string sessionCode, string clientId)
