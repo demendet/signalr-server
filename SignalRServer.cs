@@ -13,15 +13,31 @@ var builder = WebApplication.CreateBuilder(args);
 // Add console logging
 builder.Logging.AddConsole();
 
-// Add SignalR services
+// Add SignalR services with optimized settings for flight sim data
 builder.Services.AddSignalR(options =>
 {
-    options.MaximumReceiveMessageSize = 102400; // 100KB
+    options.MaximumReceiveMessageSize = 1024 * 1024; // 1MB for aircraft data
     options.EnableDetailedErrors = true;
-    options.StreamBufferCapacity = 20;
+    options.StreamBufferCapacity = 50;
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); // Longer timeout for network issues
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15); // More frequent keepalive
+});
+
+// Add CORS for development
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
 });
 
 var app = builder.Build();
+
+// Use CORS
+app.UseCors();
 
 // Map the hub
 app.MapHub<CockpitHub>("/sharedcockpithub");
@@ -36,6 +52,7 @@ public class SessionInfo
     public HashSet<string> ConnectionIds { get; set; } = new();
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
     public string? CurrentPilotFlying { get; set; }
+    public Dictionary<string, string> ClientNames { get; set; } = new(); // ConnectionId -> ClientId mapping
 }
 
 public class CockpitHub : Hub
@@ -44,6 +61,7 @@ public class CockpitHub : Hub
     
     private static readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
     private static readonly ConcurrentDictionary<string, string> _connectionToSession = new();
+    private static readonly ConcurrentDictionary<string, string> _connectionToClientId = new();
 
     public CockpitHub(ILogger<CockpitHub> logger)
     {
@@ -65,8 +83,10 @@ public class CockpitHub : Hub
         
         // Add connection to session
         session.ConnectionIds.Add(Context.ConnectionId);
+        session.ClientNames[Context.ConnectionId] = clientId;
         session.LastActivity = DateTime.UtcNow;
         _connectionToSession[Context.ConnectionId] = sessionCode;
+        _connectionToClientId[Context.ConnectionId] = clientId;
         
         // HOST IS ALWAYS INITIAL PILOT FLYING
         if (isHost && string.IsNullOrEmpty(session.CurrentPilotFlying))
@@ -78,10 +98,10 @@ public class CockpitHub : Hub
         
         // Notify other clients with current pilot flying status
         await Clients.OthersInGroup(sessionCode).SendAsync("ClientConnected", clientId, isHost);
-        await Clients.Group(sessionCode).SendAsync("PilotFlyingChanged", _sessions[sessionCode].CurrentPilotFlying);
+        await Clients.Group(sessionCode).SendAsync("PilotFlyingChanged", session.CurrentPilotFlying);
         
         _logger.LogInformation("Connection {ConnectionId} ({ClientId}) joined session {SessionCode} as {Role}. Current PF: {PF} (Total: {Count})", 
-            Context.ConnectionId, clientId, sessionCode, isHost ? "Host" : "Client", _sessions[sessionCode].CurrentPilotFlying, _sessions[sessionCode].ConnectionIds.Count);
+            Context.ConnectionId, clientId, sessionCode, isHost ? "Host" : "Client", session.CurrentPilotFlying, session.ConnectionIds.Count);
     }
     
     public async Task SendAircraftData(string sessionCode, byte[] aircraftData)
@@ -89,6 +109,12 @@ public class CockpitHub : Hub
         if (string.IsNullOrWhiteSpace(sessionCode)) return;
         
         sessionCode = sessionCode.ToLowerInvariant().Trim();
+        
+        // Update session activity
+        if (_sessions.TryGetValue(sessionCode, out var session))
+        {
+            session.LastActivity = DateTime.UtcNow;
+        }
         
         // Pure passthrough - just relay data to other clients immediately
         // No rate limiting, no modifications, exactly like recorder playback
@@ -129,8 +155,14 @@ public class CockpitHub : Hub
     
     public Task Heartbeat(string clientId)
     {
+        // Update session activity on heartbeat
+        if (_connectionToSession.TryGetValue(Context.ConnectionId, out var sessionCode) && 
+            _sessions.TryGetValue(sessionCode, out var session))
+        {
+            session.LastActivity = DateTime.UtcNow;
+        }
+        
         _logger.LogDebug("Heartbeat from {ClientId}", clientId);
-        // Could update last seen time here if needed
         return Task.CompletedTask;
     }
     
@@ -141,6 +173,22 @@ public class CockpitHub : Hub
             if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
             {
                 session.ConnectionIds.Remove(Context.ConnectionId);
+                session.ClientNames.Remove(Context.ConnectionId);
+                
+                // If the disconnected client was pilot flying, clear it
+                if (_connectionToClientId.TryGetValue(Context.ConnectionId, out var clientId) && 
+                    session.CurrentPilotFlying == clientId)
+                {
+                    session.CurrentPilotFlying = null;
+                    await Clients.Group(sessionCode).SendAsync("PilotFlyingChanged", (string?)null);
+                    _logger.LogInformation("Pilot flying cleared due to disconnect in session {SessionCode}", sessionCode);
+                }
+                
+                // Notify others of disconnect
+                if (!string.IsNullOrEmpty(clientId))
+                {
+                    await Clients.Group(sessionCode).SendAsync("ClientDisconnected", clientId);
+                }
                 
                 // Clean up empty sessions
                 if (!session.ConnectionIds.Any())
@@ -151,6 +199,13 @@ public class CockpitHub : Hub
             }
         }
         
+        _connectionToClientId.TryRemove(Context.ConnectionId, out _);
+        
+        if (exception != null)
+        {
+            _logger.LogWarning("Client disconnected with error: {Error}", exception.Message);
+        }
+        
         await base.OnDisconnectedAsync(exception);
     }
-} 
+}
