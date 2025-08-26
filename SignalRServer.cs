@@ -45,7 +45,7 @@ app.MapHub<CockpitHub>("/sharedcockpithub");
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 app.Run($"http://0.0.0.0:{port}");
 
-// Simple shared cockpit relay server - pure passthrough like recorder/playback
+// Enhanced shared cockpit relay server with dynamic variable sync
 
 public class SessionInfo
 {
@@ -53,6 +53,7 @@ public class SessionInfo
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
     public string? CurrentPilotFlying { get; set; }
     public Dictionary<string, string> ClientNames { get; set; } = new(); // ConnectionId -> ClientId mapping
+    public string? CurrentAircraftProfile { get; set; } // Track which aircraft profile is active
 }
 
 public class CockpitHub : Hub
@@ -119,6 +120,40 @@ public class CockpitHub : Hub
         // Pure passthrough - just relay data to other clients immediately
         // No rate limiting, no modifications, exactly like recorder playback
         await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", aircraftData);
+    }
+    
+    // NEW: Dynamic variable synchronization for aircraft profiles
+    public async Task SendVariableSync(string sessionCode, string variableName, object value, string variableType)
+    {
+        if (string.IsNullOrWhiteSpace(sessionCode)) return;
+        
+        sessionCode = sessionCode.ToLowerInvariant().Trim();
+        
+        // Update session activity
+        if (_sessions.TryGetValue(sessionCode, out var session))
+        {
+            session.LastActivity = DateTime.UtcNow;
+        }
+        
+        // Relay variable change to other clients in session
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveVariableSync", variableName, value, variableType);
+        
+        _logger.LogDebug("Variable sync: {Variable} = {Value} in session {Session}", variableName, value, sessionCode);
+    }
+    
+    // NEW: Set aircraft profile for session
+    public async Task SetAircraftProfile(string sessionCode, string profileName)
+    {
+        if (_sessions.TryGetValue(sessionCode, out var session))
+        {
+            session.CurrentAircraftProfile = profileName;
+            session.LastActivity = DateTime.UtcNow;
+            
+            // Notify all clients in session about profile change
+            await Clients.Group(sessionCode).SendAsync("AircraftProfileChanged", profileName);
+            
+            _logger.LogInformation("Aircraft profile set to {Profile} in session {Session}", profileName, sessionCode);
+        }
     }
     
     public async Task GiveControl(string sessionCode, string fromClientId, string toClientId)
