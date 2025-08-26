@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
 using System.Collections.Concurrent;
-using MessagePack;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -31,7 +30,7 @@ var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 app.Run($"http://0.0.0.0:{port}");
 
 // --- DYNAMIC DATA TRANSFER - NO HARDCODING NEEDED! ---
-// Server accepts ANY data structure via binary MessagePack
+// Server accepts ANY data structure via JSON byte arrays
 // This eliminates the need to modify server when adding new variables
 
 public class SharedCockpitCommand
@@ -144,7 +143,15 @@ public class CockpitHub : Hub
             
             if (shouldSend)
             {
-                // Relay compressed data to all other connections in the session
+                // Debug logging every 100 messages to avoid spam
+                var connectionCount = session.ConnectionIds.Count;
+                if (connectionCount % 100 == 0)
+                {
+                    _logger.LogInformation("Relaying {DataSize} bytes to {Count} clients in session {SessionCode}", 
+                        compressedData.Length, connectionCount - 1, sessionCode);
+                }
+                
+                // Relay JSON data to all other connections in the session
                 await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", compressedData);
             }
         }
