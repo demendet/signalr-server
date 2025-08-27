@@ -122,8 +122,8 @@ public class CockpitHub : Hub
         await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveAircraftData", aircraftData);
     }
     
-    // NEW: Dynamic variable synchronization for aircraft profiles
-    public async Task SendVariableSync(string sessionCode, string variableName, object value, string variableType)
+    // Enhanced dynamic variable synchronization with loop prevention
+    public async Task SendVariableSync(string sessionCode, string variableName, object value, string dataType, string unit, string sourceClientId)
     {
         if (string.IsNullOrWhiteSpace(sessionCode)) return;
         
@@ -135,10 +135,11 @@ public class CockpitHub : Hub
             session.LastActivity = DateTime.UtcNow;
         }
         
-        // Relay variable change to other clients in session
-        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveVariableSync", variableName, value, variableType);
+        // Relay variable change to other clients in session (excluding sender to prevent loops)
+        await Clients.OthersInGroup(sessionCode).SendAsync("ReceiveVariableSync", variableName, value, dataType, unit, sourceClientId);
         
-        _logger.LogDebug("Variable sync: {Variable} = {Value} in session {Session}", variableName, value, sessionCode);
+        _logger.LogDebug("Variable sync: {Variable} = {Value} ({DataType}, {Unit}) from {Source} in session {Session}", 
+            variableName, value, dataType, unit, sourceClientId, sessionCode);
     }
     
     // NEW: Set aircraft profile for session
