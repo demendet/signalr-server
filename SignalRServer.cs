@@ -182,6 +182,19 @@ public class CockpitHub : Hub
         }
     }
     
+    public Task<string?> GetOtherClientInSession(string sessionCode, string currentClientId)
+    {
+        if (_sessions.TryGetValue(sessionCode, out SessionInfo? session))
+        {
+            // Find the first client that is NOT the current client
+            var otherClient = session.ClientNames.Values.FirstOrDefault(clientId => clientId != currentClientId);
+            _logger.LogDebug("GetOtherClient: Current={Current}, Other={Other} in session {Session}", currentClientId, otherClient, sessionCode);
+            return Task.FromResult(otherClient);
+        }
+        
+        return Task.FromResult<string?>(null);
+    }
+    
     public async Task LeaveSession(string sessionCode, string clientId)
     {
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, sessionCode);
